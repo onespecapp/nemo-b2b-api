@@ -16,20 +16,29 @@
     "seed": "ts-node scripts/seed-demo-data.ts",
     "seed:clear": "ts-node scripts/seed-demo-data.ts --clear"
   },
-  "keywords": ["appointments", "reminders", "calls", "b2b"],
+  "keywords": [
+    "appointments",
+    "reminders",
+    "calls",
+    "b2b"
+  ],
   "author": "Nemo Cares",
   "license": "ISC",
   "dependencies": {
+    "@google/genai": "^1.39.0",
     "@supabase/supabase-js": "^2.49.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
-    "telnyx": "^5.17.0"
+    "telnyx": "^5.17.0",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.10",
+    "@types/ws": "^8.18.1",
+    "@types/yauzl": "^2.10.3",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.3"
   }
