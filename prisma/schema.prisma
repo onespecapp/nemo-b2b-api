@@ -1,0 +1,177 @@
+// Nemo B2B API - Prisma Schema
+// For appointment reminder calls service
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================
+// BUSINESS - The company using Nemo B2B
+// ============================================
+model Business {
+  id    String @id @default(cuid())
+  name  String
+  phone String?
+  email String?
+  
+  // Supabase auth user who owns this business
+  owner_id String
+  
+  // AI Voice settings
+  voice_preference String @default("Puck") // Puck, Charon, Kore, Fenrir, Aoede
+  
+  // Subscription
+  subscription_tier   SubscriptionTier @default(FREE)
+  subscription_status SubscriptionStatus @default(ACTIVE)
+  
+  // Relations
+  customers    Customer[]
+  appointments Appointment[]
+  call_logs    CallLog[]
+  
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+
+  @@map("b2b_businesses")
+}
+
+// ============================================
+// CUSTOMER - People the business calls
+// ============================================
+model Customer {
+  id    String @id @default(cuid())
+  name  String
+  phone String
+  email String?
+  notes String?
+  
+  // Business relation
+  business_id String
+  business    Business @relation(fields: [business_id], references: [id], onDelete: Cascade)
+  
+  // Relations
+  appointments Appointment[]
+  call_logs    CallLog[]
+  
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+
+  @@map("b2b_customers")
+}
+
+// ============================================
+// APPOINTMENT - Scheduled events to remind about
+// ============================================
+model Appointment {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  scheduled_at DateTime
+  duration_min Int      @default(30)
+  
+  // Reminder settings
+  reminder_enabled Boolean @default(true)
+  reminder_hours   Int     @default(24) // Hours before to call
+  
+  // Status
+  status AppointmentStatus @default(SCHEDULED)
+  
+  // Relations
+  business_id String
+  business    Business @relation(fields: [business_id], references: [id], onDelete: Cascade)
+  
+  customer_id String
+  customer    Customer @relation(fields: [customer_id], references: [id], onDelete: Cascade)
+  
+  call_logs CallLog[]
+  
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+
+  @@map("b2b_appointments")
+}
+
+// ============================================
+// CALL LOG - Record of AI calls made
+// ============================================
+model CallLog {
+  id String @id @default(cuid())
+  
+  // Call details
+  call_type    CallType
+  call_outcome CallOutcome?
+  duration_sec Int?
+  
+  // LiveKit/SIP details
+  room_name    String?
+  sip_call_id  String?
+  
+  // Transcript
+  transcript   Json?
+  summary      String?
+  
+  // Relations
+  business_id String
+  business    Business @relation(fields: [business_id], references: [id], onDelete: Cascade)
+  
+  customer_id String?
+  customer    Customer? @relation(fields: [customer_id], references: [id], onDelete: SetNull)
+  
+  appointment_id String?
+  appointment    Appointment? @relation(fields: [appointment_id], references: [id], onDelete: SetNull)
+  
+  created_at DateTime @default(now())
+
+  @@map("b2b_call_logs")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum SubscriptionTier {
+  FREE
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  TRIALING
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  RESCHEDULED
+  CANCELED
+  COMPLETED
+  NO_SHOW
+}
+
+enum CallType {
+  REMINDER      // Scheduled appointment reminder
+  TEST          // Test call from dashboard
+  FOLLOW_UP     // Follow-up call
+  CONFIRMATION  // Confirmation call
+}
+
+enum CallOutcome {
+  ANSWERED
+  NO_ANSWER
+  VOICEMAIL
+  BUSY
+  FAILED
+  CONFIRMED
+  RESCHEDULED
+  CANCELED
+}
