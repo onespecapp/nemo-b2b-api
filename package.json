@@ -12,7 +12,9 @@
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
     "lint": "eslint src --ext .ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "seed": "ts-node scripts/seed-demo-data.ts",
+    "seed:clear": "ts-node scripts/seed-demo-data.ts --clear"
   },
   "keywords": ["appointments", "reminders", "calls", "b2b"],
   "author": "Nemo Cares",
@@ -28,6 +30,7 @@
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.10",
+    "ts-node": "^10.9.2",
     "typescript": "^5.7.3"
   }
 }
