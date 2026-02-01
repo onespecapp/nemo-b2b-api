@@ -23,6 +23,9 @@ model Business {
   // Supabase auth user who owns this business
   owner_id String
   
+  // Business category (determines call templates)
+  category BusinessCategory @default(OTHER)
+  
   // AI Voice settings
   voice_preference String @default("Puck") // Puck, Charon, Kore, Fenrir, Aoede
   
@@ -39,6 +42,35 @@ model Business {
   updated_at DateTime @default(now()) @updatedAt
 
   @@map("b2b_businesses")
+}
+
+// ============================================
+// REMINDER TEMPLATE - Category-specific call scripts
+// ============================================
+model ReminderTemplate {
+  id String @id @default(cuid())
+  
+  // Which category this template is for
+  category BusinessCategory @unique
+  
+  // Display name for the category
+  category_label String
+  
+  // Template content
+  system_prompt    String  // Full system prompt for the AI
+  greeting         String  // Opening message
+  confirmation_ask String  // How to ask for confirmation
+  reschedule_ask   String  // How to ask about rescheduling
+  closing          String  // Closing message
+  voicemail        String  // Message to leave on voicemail
+  
+  // Placeholder info (for UI/docs)
+  placeholders Json? // e.g., {"business_name": "Your Barbershop", "service": "haircut"}
+  
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+
+  @@map("b2b_reminder_templates")
 }
 
 // ============================================
@@ -174,4 +206,17 @@ enum CallOutcome {
   CONFIRMED
   RESCHEDULED
   CANCELED
+}
+
+enum BusinessCategory {
+  BARBERSHOP
+  SALON
+  DENTAL
+  MEDICAL
+  AUTO_REPAIR
+  PET_GROOMING
+  SPA
+  FITNESS
+  TUTORING
+  OTHER
 }

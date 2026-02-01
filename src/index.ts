@@ -384,7 +384,7 @@ app.get('/api/appointments/pending-reminders', asyncHandler(async (req: Request,
 app.post('/api/appointments/:id/trigger-call', asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   
-  // Get appointment details
+  // Get appointment details with business category
   const { data: appointment, error: fetchError } = await supabase
     .from('b2b_appointments')
     .select(`
@@ -410,14 +410,99 @@ app.post('/api/appointments/:id/trigger-call', asyncHandler(async (req: Request,
     return res.status(400).json({ error: 'Invalid phone number format' });
   }
 
+  // Fetch template based on business category
+  const businessCategory = appointment.business?.category || 'OTHER';
+  const { data: template } = await supabase
+    .from('b2b_reminder_templates')
+    .select('*')
+    .eq('category', businessCategory)
+    .single();
+
   log.info('Triggering reminder call', {
     appointmentId: id,
     customer: appointment.customer?.name,
     phone: customerPhone,
-    scheduledAt: appointment.scheduled_at
+    scheduledAt: appointment.scheduled_at,
+    category: businessCategory,
+    hasTemplate: !!template,
   });
 
-  // Create call via Telnyx
+  // Use LiveKit (Gemini voice) if available
+  if (livekitEnabled && sipClient && agentDispatch) {
+    try {
+      const roomName = `reminder-${id}-${Date.now()}`;
+      
+      // Prepare metadata with appointment and template data
+      const metadata = JSON.stringify({
+        call_type: 'reminder',
+        voice_preference: appointment.business?.voice_preference || 'Puck',
+        appointment: {
+          id: appointment.id,
+          title: appointment.title,
+          scheduled_at: appointment.scheduled_at,
+          customer_name: appointment.customer?.name,
+          business_name: appointment.business?.name,
+          business_category: businessCategory,
+        },
+        template: template ? {
+          category: template.category,
+          system_prompt: template.system_prompt,
+          greeting: template.greeting,
+          confirmation_ask: template.confirmation_ask,
+          reschedule_ask: template.reschedule_ask,
+          closing: template.closing,
+          voicemail: template.voicemail,
+        } : null,
+      });
+
+      // Dispatch agent to room
+      await agentDispatch.createDispatch(roomName, config.livekitAgentName, {
+        metadata: metadata,
+      });
+
+      // Create outbound SIP call
+      const sipCall = await sipClient.createSipParticipant(
+        config.livekitSipTrunkId,
+        customerPhone,
+        roomName,
+        {
+          participantIdentity: `customer-${appointment.customer_id}`,
+          participantName: appointment.customer?.name || 'Customer',
+          playDialtone: false,
+        }
+      );
+
+      log.info('LiveKit reminder call created', { roomName, sipCallId: sipCall.sipCallId });
+
+      // Update appointment status
+      await supabase
+        .from('b2b_appointments')
+        .update({ status: 'REMINDED' })
+        .eq('id', id);
+
+      // Log the call
+      await supabase.from('b2b_call_logs').insert({
+        appointment_id: id,
+        customer_id: appointment.customer_id,
+        business_id: appointment.business_id,
+        call_type: 'REMINDER',
+        room_name: roomName,
+        sip_call_id: sipCall.sipCallId,
+      });
+
+      return res.json({ 
+        success: true, 
+        message: 'Call initiated via Gemini AI',
+        room_name: roomName,
+        sip_call_id: sipCall.sipCallId,
+        template_used: template?.category || null,
+      });
+    } catch (error) {
+      log.error('LiveKit call failed, falling back to Telnyx', error);
+    }
+  }
+
+  // Fallback: Create call via Telnyx (basic TTS)
   const call = await telnyx.calls.dial({
     connection_id: config.telnyxConnectionId,
     to: customerPhone,
@@ -430,6 +515,7 @@ app.post('/api/appointments/:id/trigger-call', asyncHandler(async (req: Request,
       { name: 'X-Appointment-Title', value: appointment.title },
       { name: 'X-Appointment-Time', value: appointment.scheduled_at },
       { name: 'X-Business-Name', value: appointment.business?.name || 'Our office' },
+      { name: 'X-Business-Category', value: businessCategory },
     ],
   });
 
@@ -452,7 +538,7 @@ app.post('/api/appointments/:id/trigger-call', asyncHandler(async (req: Request,
 
   res.json({ 
     success: true, 
-    message: 'Call initiated',
+    message: 'Call initiated (basic TTS)',
     call_id: call.data?.call_control_id,
   });
 }));
@@ -637,7 +723,7 @@ app.get('/api/call-logs', asyncHandler(async (req: Request, res: Response) => {
 
 // Manual test call endpoint (uses basic TTS)
 app.post('/api/test-call', asyncHandler(async (req: Request, res: Response) => {
-  const { phone, message, voice_preference, business_name } = req.body;
+  const { phone, message, voice_preference, business_name, business_id, business_category } = req.body;
   
   if (!phone) {
     return res.status(400).json({ error: 'phone is required in request body' });
@@ -648,7 +734,33 @@ app.post('/api/test-call', asyncHandler(async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Invalid phone number format. Use E.164 format (e.g., +1234567890)' });
   }
 
-  log.info('Making test call', { phone, livekitEnabled });
+  log.info('Making test call', { phone, livekitEnabled, business_category });
+
+  // Fetch template if category provided
+  let template = null;
+  if (business_category || business_id) {
+    let category = business_category;
+    
+    // If business_id provided, fetch the business to get category
+    if (business_id && !category) {
+      const { data: business } = await supabase
+        .from('b2b_businesses')
+        .select('category')
+        .eq('id', business_id)
+        .single();
+      category = business?.category || 'OTHER';
+    }
+    
+    // Fetch template for this category
+    const { data: templateData } = await supabase
+      .from('b2b_reminder_templates')
+      .select('*')
+      .eq('category', category || 'OTHER')
+      .single();
+    
+    template = templateData;
+    log.info('Using template for category', { category, hasTemplate: !!template });
+  }
 
   // Use LiveKit if configured (Gemini voice), otherwise fall back to Telnyx TTS
   if (livekitEnabled && sipClient && agentDispatch) {
@@ -656,13 +768,22 @@ app.post('/api/test-call', asyncHandler(async (req: Request, res: Response) => {
       // Create a unique room for this call
       const roomName = `test-call-${Date.now()}`;
       
-      // Prepare metadata for the agent
+      // Prepare metadata for the agent (include template if available)
       const metadata = JSON.stringify({
         call_type: 'test',
         voice_preference: voice_preference || 'Puck',
         family_name: business_name || 'Nemo B2B',
         recipient_preferred_name: 'there',
         greeting_message: message || 'Hello! This is a test call from Nemo. How do I sound?',
+        template: template ? {
+          category: template.category,
+          system_prompt: template.system_prompt,
+          greeting: template.greeting,
+          confirmation_ask: template.confirmation_ask,
+          reschedule_ask: template.reschedule_ask,
+          closing: template.closing,
+          voicemail: template.voicemail,
+        } : null,
       });
 
       // First, dispatch the agent to the room so it's ready when the call connects
@@ -871,6 +992,69 @@ app.post('/api/webhooks/telnyx/ai-call', asyncHandler(async (req: Request, res: 
 
   res.json({ received: true });
 }));
+
+// ============================================
+// TEMPLATE ENDPOINTS
+// ============================================
+
+// Get all available templates (for admin/debugging)
+app.get('/api/templates', asyncHandler(async (req: Request, res: Response) => {
+  const { data: templates, error } = await supabase
+    .from('b2b_reminder_templates')
+    .select('*')
+    .order('category_label');
+
+  if (error) {
+    log.error('Failed to fetch templates', error);
+    throw error;
+  }
+
+  res.json({ templates, count: templates?.length || 0 });
+}));
+
+// Get template by category
+app.get('/api/templates/:category', asyncHandler(async (req: Request, res: Response) => {
+  const { category } = req.params;
+  
+  const { data: template, error } = await supabase
+    .from('b2b_reminder_templates')
+    .select('*')
+    .eq('category', category.toUpperCase())
+    .single();
+
+  if (error || !template) {
+    // Fall back to OTHER template
+    const { data: fallback } = await supabase
+      .from('b2b_reminder_templates')
+      .select('*')
+      .eq('category', 'OTHER')
+      .single();
+    
+    if (fallback) {
+      return res.json({ template: fallback });
+    }
+    return res.status(404).json({ error: 'Template not found' });
+  }
+
+  res.json({ template });
+}));
+
+// Get business categories list (for signup dropdown)
+app.get('/api/business-categories', (req: Request, res: Response) => {
+  const categories = [
+    { value: 'BARBERSHOP', label: 'Barbershop', icon: '💈' },
+    { value: 'SALON', label: 'Hair Salon', icon: '💇' },
+    { value: 'DENTAL', label: 'Dental Office', icon: '🦷' },
+    { value: 'MEDICAL', label: 'Medical Clinic', icon: '🏥' },
+    { value: 'AUTO_REPAIR', label: 'Auto Repair Shop', icon: '🚗' },
+    { value: 'PET_GROOMING', label: 'Pet Grooming', icon: '🐕' },
+    { value: 'SPA', label: 'Spa & Wellness', icon: '💆' },
+    { value: 'FITNESS', label: 'Fitness & Training', icon: '💪' },
+    { value: 'TUTORING', label: 'Tutoring & Education', icon: '📚' },
+    { value: 'OTHER', label: 'Other', icon: '🏢' },
+  ];
+  res.json({ categories });
+});
 
 // 404 handler
 app.use((req, res) => {
