@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { GoogleGenAI, Modality } from '@google/genai';
+import { SipClient, RoomServiceClient, AgentDispatchClient } from 'livekit-server-sdk';
 
 dotenv.config();
 
@@ -39,7 +40,29 @@ const config = {
   telnyxPhoneNumber: process.env.TELNYX_PHONE_NUMBER!,
   googleAiApiKey: process.env.GOOGLE_AI_API_KEY,
   nodeEnv: process.env.NODE_ENV || 'development',
+  // LiveKit config (optional - for Gemini voice)
+  livekitUrl: process.env.LIVEKIT_URL || '',
+  livekitApiKey: process.env.LIVEKIT_API_KEY || '',
+  livekitApiSecret: process.env.LIVEKIT_API_SECRET || '',
+  livekitSipTrunkId: process.env.SIP_TRUNK_ID || '',
+  livekitAgentName: process.env.LIVEKIT_AGENT_NAME || 'nemo_b2b_agent',
 };
+
+// LiveKit clients (initialized if config is present)
+const livekitEnabled = !!(config.livekitUrl && config.livekitApiKey && config.livekitApiSecret && config.livekitSipTrunkId);
+let sipClient: SipClient | null = null;
+let roomClient: RoomServiceClient | null = null;
+let agentDispatch: AgentDispatchClient | null = null;
+
+if (livekitEnabled) {
+  sipClient = new SipClient(config.livekitUrl, config.livekitApiKey, config.livekitApiSecret);
+  roomClient = new RoomServiceClient(config.livekitUrl, config.livekitApiKey, config.livekitApiSecret);
+  agentDispatch = new AgentDispatchClient(config.livekitUrl, config.livekitApiKey, config.livekitApiSecret);
+  console.log('✅ LiveKit integration enabled');
+  console.log(`   Agent: ${config.livekitAgentName}`);
+} else {
+  console.log('⚠️ LiveKit not configured - using basic Telnyx TTS for calls');
+}
 
 // ============================================
 // LOGGING UTILITY
@@ -320,7 +343,7 @@ app.get('/health', (req, res) => {
     service: 'nemo-b2b-api',
     version: '1.1.0',
     environment: config.nodeEnv,
-    geminiEnabled: !!googleAI,
+    geminiEnabled: livekitEnabled,
     timestamp: new Date().toISOString()
   });
 });
@@ -614,7 +637,7 @@ app.get('/api/call-logs', asyncHandler(async (req: Request, res: Response) => {
 
 // Manual test call endpoint (uses basic TTS)
 app.post('/api/test-call', asyncHandler(async (req: Request, res: Response) => {
-  const { phone, message } = req.body;
+  const { phone, message, voice_preference, business_name } = req.body;
   
   if (!phone) {
     return res.status(400).json({ error: 'phone is required in request body' });
@@ -625,8 +648,57 @@ app.post('/api/test-call', asyncHandler(async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Invalid phone number format. Use E.164 format (e.g., +1234567890)' });
   }
 
-  log.info('Making test call', { phone });
+  log.info('Making test call', { phone, livekitEnabled });
 
+  // Use LiveKit if configured (Gemini voice), otherwise fall back to Telnyx TTS
+  if (livekitEnabled && sipClient && agentDispatch) {
+    try {
+      // Create a unique room for this call
+      const roomName = `test-call-${Date.now()}`;
+      
+      // Prepare metadata for the agent
+      const metadata = JSON.stringify({
+        call_type: 'test',
+        voice_preference: voice_preference || 'Puck',
+        family_name: business_name || 'Nemo B2B',
+        recipient_preferred_name: 'there',
+        greeting_message: message || 'Hello! This is a test call from Nemo. How do I sound?',
+      });
+
+      // First, dispatch the agent to the room so it's ready when the call connects
+      log.info('Dispatching agent to room', { roomName, agentName: config.livekitAgentName });
+      await agentDispatch.createDispatch(roomName, config.livekitAgentName, {
+        metadata: metadata,
+      });
+
+      // Create outbound SIP call via LiveKit
+      const sipCall = await sipClient.createSipParticipant(
+        config.livekitSipTrunkId,
+        phone,
+        roomName,
+        {
+          participantIdentity: `caller-${Date.now()}`,
+          participantName: 'Test Call Recipient',
+          playDialtone: false,
+        }
+      );
+
+      log.info('LiveKit SIP call created', { roomName, sipCallId: sipCall.sipCallId });
+
+      return res.json({ 
+        success: true, 
+        message: 'Test call initiated via Gemini AI',
+        room_name: roomName,
+        sip_call_id: sipCall.sipCallId,
+        voice: voice_preference || 'Puck',
+      });
+    } catch (error: any) {
+      log.error('LiveKit call failed, falling back to Telnyx', error);
+      // Fall through to Telnyx
+    }
+  }
+  
+  // Fallback: Use Telnyx with basic TTS
   const call = await telnyx.calls.dial({
     connection_id: config.telnyxConnectionId,
     to: phone,
@@ -637,7 +709,7 @@ app.post('/api/test-call', asyncHandler(async (req: Request, res: Response) => {
 
   res.json({ 
     success: true, 
-    message: 'Test call initiated',
+    message: 'Test call initiated (basic TTS)',
     call_id: call.data?.call_control_id 
   });
 }));
