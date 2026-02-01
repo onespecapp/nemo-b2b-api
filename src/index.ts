@@ -1014,7 +1014,7 @@ app.get('/api/templates', asyncHandler(async (req: Request, res: Response) => {
 
 // Get template by category
 app.get('/api/templates/:category', asyncHandler(async (req: Request, res: Response) => {
-  const { category } = req.params;
+  const category = req.params.category as string;
   
   const { data: template, error } = await supabase
     .from('b2b_reminder_templates')
