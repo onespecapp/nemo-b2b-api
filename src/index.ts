@@ -352,7 +352,7 @@ app.get('/health', (req, res) => {
 app.get('/api/appointments/pending-reminders', asyncHandler(async (req: Request, res: Response) => {
   const now = new Date();
   
-  // Fetch appointments that are scheduled (case-insensitive) and within the next 24 hours
+  // Fetch appointments that are scheduled and within the next 24 hours
   const { data: appointments, error } = await supabase
     .from('b2b_appointments')
     .select(`
@@ -360,7 +360,7 @@ app.get('/api/appointments/pending-reminders', asyncHandler(async (req: Request,
       customer:b2b_customers(*),
       business:b2b_businesses(*)
     `)
-    .ilike('status', 'scheduled')
+    .eq('status', 'SCHEDULED')
     .lte('scheduled_at', new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString())
     .gte('scheduled_at', now.toISOString()); // Only future appointments
 
@@ -1275,7 +1275,7 @@ async function checkAndTriggerReminders() {
         customer:b2b_customers(*),
         business:b2b_businesses(*)
       `)
-      .ilike('status', 'scheduled')
+      .eq('status', 'SCHEDULED')
       .lte('scheduled_at', new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString())
       .gte('scheduled_at', now.toISOString());
 
