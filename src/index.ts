@@ -1263,6 +1263,7 @@ async function checkAndTriggerReminders() {
   }
   
   schedulerRunning = true;
+  log.info('Scheduler: Checking for pending reminders...');
   
   try {
     const now = new Date();
@@ -1293,7 +1294,7 @@ async function checkAndTriggerReminders() {
     }) || [];
 
     if (pendingReminders.length === 0) {
-      log.debug('Scheduler: No pending reminders');
+      log.info('Scheduler: No pending reminders');
       return;
     }
 
