@@ -353,6 +353,8 @@ app.get('/api/appointments/pending-reminders', asyncHandler(async (req: Request,
   const now = new Date();
   
   // Fetch appointments that are scheduled and within the next 24 hours
+  // Include appointments up to 1 hour in the past (in case scheduler missed them)
+  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
   const { data: appointments, error } = await supabase
     .from('b2b_appointments')
     .select(`
@@ -362,7 +364,7 @@ app.get('/api/appointments/pending-reminders', asyncHandler(async (req: Request,
     `)
     .eq('status', 'SCHEDULED')
     .lte('scheduled_at', new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString())
-    .gte('scheduled_at', now.toISOString()); // Only future appointments
+    .gte('scheduled_at', oneHourAgo.toISOString());
 
   if (error) {
     log.error('Failed to fetch appointments', error);
@@ -1269,6 +1271,8 @@ async function checkAndTriggerReminders() {
     const now = new Date();
     
     // Fetch appointments that need reminders
+    // Include appointments up to 1 hour in the past (in case scheduler missed them)
+    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
     const { data: appointments, error } = await supabase
       .from('b2b_appointments')
       .select(`
@@ -1278,7 +1282,7 @@ async function checkAndTriggerReminders() {
       `)
       .eq('status', 'SCHEDULED')
       .lte('scheduled_at', new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString())
-      .gte('scheduled_at', now.toISOString());
+      .gte('scheduled_at', oneHourAgo.toISOString());
 
     if (error) {
       log.error('Scheduler: Failed to fetch appointments', error);
