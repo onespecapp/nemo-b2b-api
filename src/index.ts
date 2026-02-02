@@ -1257,6 +1257,7 @@ app.use((req, res) => {
 
 const SCHEDULER_INTERVAL_MS = 60 * 1000; // Check every minute
 let schedulerRunning = false;
+const INSTANCE_ID = `api-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 async function checkAndTriggerReminders() {
   if (schedulerRunning) {
@@ -1265,7 +1266,7 @@ async function checkAndTriggerReminders() {
   }
   
   schedulerRunning = true;
-  log.info('Scheduler: Checking for pending reminders...');
+  log.info(`Scheduler: Checking for pending reminders... (instance: ${INSTANCE_ID})`);
   
   try {
     const now = new Date();
@@ -1321,18 +1322,25 @@ async function checkAndTriggerReminders() {
 
         // ATOMICALLY claim this appointment to prevent duplicate calls from multiple instances
         // Only update if status is still SCHEDULED (prevents race condition)
-        const { data: claimed, error: claimError } = await supabase
+        const { data: claimedRows, error: claimError } = await supabase
           .from('b2b_appointments')
           .update({ status: 'REMINDED', updated_at: new Date().toISOString() })
           .eq('id', appointment.id)
           .eq('status', 'SCHEDULED')  // Only if still SCHEDULED
-          .select()
-          .single();
+          .select();
 
-        if (claimError || !claimed) {
+        // If no rows updated, appointment was already claimed by another instance
+        if (claimError) {
+          log.error(`Scheduler: Error claiming appointment ${appointment.id}`, claimError);
+          continue;
+        }
+        
+        if (!claimedRows || claimedRows.length === 0) {
           log.info(`Scheduler: Appointment ${appointment.id} already claimed by another instance, skipping`);
           continue;
         }
+        
+        const claimed = claimedRows[0];
 
         log.info(`Scheduler: Triggering call for appointment ${appointment.id}`, {
           customer: appointment.customer?.name,
