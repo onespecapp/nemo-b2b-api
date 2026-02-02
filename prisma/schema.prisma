@@ -183,6 +183,7 @@ enum SubscriptionStatus {
 
 enum AppointmentStatus {
   SCHEDULED
+  REMINDED
   CONFIRMED
   RESCHEDULED
   CANCELED
