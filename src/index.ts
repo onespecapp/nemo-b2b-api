@@ -707,7 +707,7 @@ app.get('/api/call-logs', asyncHandler(async (req: Request, res: Response) => {
     .select(`
       *,
       customer:b2b_customers(name, phone),
-      appointment:b2b_appointments(title, scheduled_at)
+      appointment:b2b_appointments(title, scheduled_at, status)
     `)
     .eq('business_id', business_id)
     .order('created_at', { ascending: false })
@@ -719,6 +719,192 @@ app.get('/api/call-logs', asyncHandler(async (req: Request, res: Response) => {
   }
 
   res.json({ logs, count: logs?.length || 0 });
+}));
+
+// Get a single call log with full transcript
+app.get('/api/calls/:id', asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  const { data: call, error } = await supabase
+    .from('b2b_call_logs')
+    .select(`
+      *,
+      customer:b2b_customers(name, phone, email),
+      appointment:b2b_appointments(title, scheduled_at, status, description)
+    `)
+    .eq('id', id)
+    .single();
+
+  if (error) {
+    log.error('Failed to fetch call', error);
+    throw error;
+  }
+  
+  if (!call) {
+    return res.status(404).json({ error: 'Call not found' });
+  }
+
+  res.json({ call });
+}));
+
+// Find call log by room name (used by agent to get call_log_id)
+app.get('/api/calls/by-room/:roomName', asyncHandler(async (req: Request, res: Response) => {
+  const { roomName } = req.params;
+
+  const { data: call, error } = await supabase
+    .from('b2b_call_logs')
+    .select('*')
+    .eq('room_name', roomName)
+    .single();
+
+  if (error && error.code !== 'PGRST116') {
+    log.error('Failed to find call by room', error);
+    throw error;
+  }
+  
+  if (!call) {
+    return res.status(404).json({ error: 'Call not found for this room' });
+  }
+
+  res.json({ call });
+}));
+
+// ==========================================
+// AGENT CALLBACK ENDPOINTS
+// Called by the LiveKit agent during/after calls
+// ==========================================
+
+// Update appointment status (called by agent on confirm/cancel)
+app.patch('/api/appointments/:id/status', asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { status, notes, call_log_id } = req.body;
+
+  // Validate status
+  const validStatuses = ['SCHEDULED', 'CONFIRMED', 'RESCHEDULED', 'CANCELED', 'COMPLETED', 'NO_SHOW'];
+  if (!validStatuses.includes(status?.toUpperCase())) {
+    return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+  }
+
+  log.info('Updating appointment status', { id, status, call_log_id });
+
+  // Update appointment
+  const { data: appointment, error: updateError } = await supabase
+    .from('b2b_appointments')
+    .update({ 
+      status: status.toUpperCase(),
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (updateError) {
+    log.error('Failed to update appointment status', updateError);
+    throw updateError;
+  }
+
+  // If call_log_id provided, update the call outcome too
+  if (call_log_id) {
+    const callOutcome = status.toUpperCase() === 'CONFIRMED' ? 'CONFIRMED' 
+      : status.toUpperCase() === 'CANCELED' ? 'CANCELED'
+      : status.toUpperCase() === 'RESCHEDULED' ? 'RESCHEDULED'
+      : 'ANSWERED';
+
+    await supabase
+      .from('b2b_call_logs')
+      .update({ 
+        call_outcome: callOutcome,
+        summary: notes || null
+      })
+      .eq('id', call_log_id);
+  }
+
+  res.json({ success: true, appointment });
+}));
+
+// Request reschedule (called by agent when customer wants to reschedule)
+app.post('/api/appointments/:id/reschedule', asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { preferred_time, reason, call_log_id } = req.body;
+
+  log.info('Reschedule requested', { id, preferred_time, reason, call_log_id });
+
+  // Get existing description to append to
+  const { data: existing } = await supabase
+    .from('b2b_appointments')
+    .select('description')
+    .eq('id', id)
+    .single();
+
+  const rescheduleNote = `[RESCHEDULE REQUESTED] Preferred time: ${preferred_time}. Reason: ${reason || 'Not specified'}`;
+  const newDescription = existing?.description 
+    ? `${existing.description}\n\n${rescheduleNote}`
+    : rescheduleNote;
+
+  // Update appointment status to RESCHEDULED and add notes
+  const { data: appointment, error: updateError } = await supabase
+    .from('b2b_appointments')
+    .update({ 
+      status: 'RESCHEDULED',
+      description: newDescription,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (updateError) {
+    log.error('Failed to process reschedule', updateError);
+    throw updateError;
+  }
+
+  // Update call log if provided
+  if (call_log_id) {
+    await supabase
+      .from('b2b_call_logs')
+      .update({ 
+        call_outcome: 'RESCHEDULED',
+        summary: `Customer requested to reschedule. Preferred time: ${preferred_time}. Reason: ${reason || 'Not specified'}`
+      })
+      .eq('id', call_log_id);
+  }
+
+  res.json({ success: true, appointment });
+}));
+
+// Save call transcript (called by agent at end of call)
+app.post('/api/calls/:id/transcript', asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { transcript, summary, duration_sec, call_outcome } = req.body;
+
+  log.info('Saving transcript', { id, duration_sec, call_outcome });
+
+  const updateData: any = {
+    transcript: transcript || null,
+    summary: summary || null,
+  };
+
+  if (duration_sec !== undefined) {
+    updateData.duration_sec = duration_sec;
+  }
+
+  if (call_outcome) {
+    updateData.call_outcome = call_outcome.toUpperCase();
+  }
+
+  const { data: call, error } = await supabase
+    .from('b2b_call_logs')
+    .update(updateData)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    log.error('Failed to save transcript', error);
+    throw error;
+  }
+
+  res.json({ success: true, call });
 }));
 
 // Manual test call endpoint (uses basic TTS)
