@@ -1319,6 +1319,21 @@ async function checkAndTriggerReminders() {
           continue;
         }
 
+        // ATOMICALLY claim this appointment to prevent duplicate calls from multiple instances
+        // Only update if status is still SCHEDULED (prevents race condition)
+        const { data: claimed, error: claimError } = await supabase
+          .from('b2b_appointments')
+          .update({ status: 'REMINDED', updated_at: new Date().toISOString() })
+          .eq('id', appointment.id)
+          .eq('status', 'SCHEDULED')  // Only if still SCHEDULED
+          .select()
+          .single();
+
+        if (claimError || !claimed) {
+          log.info(`Scheduler: Appointment ${appointment.id} already claimed by another instance, skipping`);
+          continue;
+        }
+
         log.info(`Scheduler: Triggering call for appointment ${appointment.id}`, {
           customer: appointment.customer?.name,
           phone: customerPhone,
@@ -1376,12 +1391,6 @@ async function checkAndTriggerReminders() {
 
           log.info(`Scheduler: LiveKit call created for ${appointment.id}`, { roomName, sipCallId: sipCall.sipCallId });
 
-          // Update status to REMINDED
-          await supabase
-            .from('b2b_appointments')
-            .update({ status: 'REMINDED' })
-            .eq('id', appointment.id);
-
           // Log the call
           await supabase.from('b2b_call_logs').insert({
             appointment_id: appointment.id,
@@ -1412,10 +1421,7 @@ async function checkAndTriggerReminders() {
 
           log.info(`Scheduler: Telnyx call created for ${appointment.id}`, { callId: call.data?.call_control_id });
 
-          await supabase
-            .from('b2b_appointments')
-            .update({ status: 'REMINDED' })
-            .eq('id', appointment.id);
+          // Note: Status already updated to REMINDED above (atomic claim)
 
           await supabase.from('b2b_call_logs').insert({
             appointment_id: appointment.id,
@@ -1428,6 +1434,11 @@ async function checkAndTriggerReminders() {
 
       } catch (callError) {
         log.error(`Scheduler: Failed to trigger call for appointment ${appointment.id}`, callError);
+        // If call failed, revert status back to SCHEDULED so it can be retried
+        await supabase
+          .from('b2b_appointments')
+          .update({ status: 'SCHEDULED' })
+          .eq('id', appointment.id);
       }
     }
 
