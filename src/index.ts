@@ -425,6 +425,9 @@ async function closeGeminiSession(callControlId: string) {
 const app = express();
 const server = createServer(app);
 
+// Trust first proxy (fixes ERR_ERL_UNEXPECTED_X_FORWARDED_FOR when behind reverse proxy)
+app.set('trust proxy', 1);
+
 // WebSocket server for Telnyx media streams
 const wss = new WebSocketServer({ server, path: '/media-stream' });
 
