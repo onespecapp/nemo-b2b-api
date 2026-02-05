@@ -102,12 +102,14 @@ const E164_PHONE_REGEX = /^\+?[1-9]\d{1,14}$/;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // Validate phone number format
-function isValidPhoneNumber(phone: string): boolean {
+function isValidPhoneNumber(phone: string | string[] | undefined): phone is string {
+  if (typeof phone !== 'string') return false;
   return E164_PHONE_REGEX.test(phone);
 }
 
 // Validate UUID format
-function isValidUUID(id: string): boolean {
+function isValidUUID(id: string | string[] | undefined): id is string {
+  if (typeof id !== 'string') return false;
   return UUID_REGEX.test(id);
 }
 
