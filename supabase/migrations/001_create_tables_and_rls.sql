@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS b2b_businesses (
   phone TEXT,
   email TEXT,
   owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  voice_preference TEXT DEFAULT 'Puck',
+  voice_preference TEXT DEFAULT 'Kore',
   timezone TEXT DEFAULT 'America/Los_Angeles',
   subscription_tier TEXT DEFAULT 'FREE' CHECK (subscription_tier IN ('FREE', 'STARTER', 'PROFESSIONAL', 'ENTERPRISE')),
   subscription_status TEXT DEFAULT 'ACTIVE' CHECK (subscription_status IN ('ACTIVE', 'PAST_DUE', 'CANCELED', 'TRIALING')),
