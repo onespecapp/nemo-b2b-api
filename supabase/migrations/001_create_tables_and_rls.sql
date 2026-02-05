@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS b2b_customers (
   phone TEXT NOT NULL,
   email TEXT,
   notes TEXT,
+  timezone TEXT DEFAULT NULL,
   business_id TEXT NOT NULL REFERENCES b2b_businesses(id) ON DELETE CASCADE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -240,5 +241,12 @@ BEGIN
     WHERE table_name = 'b2b_businesses' AND column_name = 'timezone'
   ) THEN
     ALTER TABLE b2b_businesses ADD COLUMN timezone TEXT DEFAULT 'America/Los_Angeles';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'b2b_customers' AND column_name = 'timezone'
+  ) THEN
+    ALTER TABLE b2b_customers ADD COLUMN timezone TEXT DEFAULT NULL;
   END IF;
 END $$;

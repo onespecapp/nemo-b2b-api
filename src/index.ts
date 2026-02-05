@@ -745,7 +745,7 @@ app.post('/api/appointments/:id/trigger-call', authenticateUser, callRateLimiter
           customer_name: appointment.customer?.name,
           business_name: appointment.business?.name,
           business_category: businessCategory,
-          business_timezone: appointment.business?.timezone || 'America/Los_Angeles',
+          business_timezone: appointment.customer?.timezone || appointment.business?.timezone || 'America/Los_Angeles',
         },
         template: template ? {
           category: template.category,
@@ -819,7 +819,7 @@ app.post('/api/appointments/:id/trigger-call', authenticateUser, callRateLimiter
       { name: 'X-Appointment-Time', value: appointment.scheduled_at },
       { name: 'X-Business-Name', value: appointment.business?.name || 'Our office' },
       { name: 'X-Business-Category', value: businessCategory },
-      { name: 'X-Business-Timezone', value: appointment.business?.timezone || 'America/Los_Angeles' },
+      { name: 'X-Business-Timezone', value: appointment.customer?.timezone || appointment.business?.timezone || 'America/Los_Angeles' },
     ],
   });
 
@@ -1726,7 +1726,7 @@ async function checkAndTriggerReminders() {
               customer_name: appointment.customer?.name,
               business_name: appointment.business?.name,
               business_category: businessCategory,
-              business_timezone: appointment.business?.timezone || 'America/Los_Angeles',
+              business_timezone: appointment.customer?.timezone || appointment.business?.timezone || 'America/Los_Angeles',
             },
             template: template ? {
               category: template.category,
@@ -1781,7 +1781,7 @@ async function checkAndTriggerReminders() {
               { name: 'X-Appointment-Time', value: appointment.scheduled_at },
               { name: 'X-Business-Name', value: appointment.business?.name || 'Our office' },
               { name: 'X-Business-Category', value: businessCategory },
-              { name: 'X-Business-Timezone', value: appointment.business?.timezone || 'America/Los_Angeles' },
+              { name: 'X-Business-Timezone', value: appointment.customer?.timezone || appointment.business?.timezone || 'America/Los_Angeles' },
             ],
           });
 
