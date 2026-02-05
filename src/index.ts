@@ -737,7 +737,7 @@ app.post('/api/appointments/:id/trigger-call', authenticateUser, callRateLimiter
       // Prepare metadata with appointment and template data
       const metadata = JSON.stringify({
         call_type: 'reminder',
-        voice_preference: appointment.business?.voice_preference || 'Kore',
+        voice_preference: appointment.business?.voice_preference || 'Aoede',
         appointment: {
           id: appointment.id,
           title: appointment.title,
@@ -1317,7 +1317,7 @@ app.post('/api/test-call', authenticateUser, callRateLimiter, asyncHandler(async
       // Prepare metadata for the agent (include template if available)
       const metadata = JSON.stringify({
         call_type: 'test',
-        voice_preference: voice_preference || 'Kore',
+        voice_preference: voice_preference || 'Aoede',
         family_name: business_name || 'Nemo B2B',
         recipient_preferred_name: 'there',
         greeting_message: message || 'Hello! This is a test call from Nemo. How do I sound?',
@@ -1357,7 +1357,7 @@ app.post('/api/test-call', authenticateUser, callRateLimiter, asyncHandler(async
         message: 'Test call initiated via Gemini AI',
         room_name: roomName,
         sip_call_id: sipCall.sipCallId,
-        voice: voice_preference || 'Kore',
+        voice: voice_preference || 'Aoede',
       });
     } catch (error: any) {
       log.error('LiveKit call failed, falling back to Telnyx', error);
@@ -1718,7 +1718,7 @@ async function checkAndTriggerReminders() {
           
           const metadata = JSON.stringify({
             call_type: 'reminder',
-            voice_preference: appointment.business?.voice_preference || 'Kore',
+            voice_preference: appointment.business?.voice_preference || 'Aoede',
             appointment: {
               id: appointment.id,
               title: appointment.title,

@@ -27,7 +27,7 @@ model Business {
   category BusinessCategory @default(OTHER)
   
   // AI Voice settings
-  voice_preference String @default("Puck") // Puck, Charon, Kore, Fenrir, Aoede
+  voice_preference String @default("Aoede") // Puck, Charon, Kore, Fenrir, Aoede
   
   // Subscription
   subscription_tier   SubscriptionTier @default(FREE)
