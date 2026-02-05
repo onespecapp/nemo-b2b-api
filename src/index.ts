@@ -5,7 +5,7 @@ import Telnyx from 'telnyx';
 import dotenv from 'dotenv';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createServer } from 'http';
-import { GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { SipClient, RoomServiceClient, AgentDispatchClient } from 'livekit-server-sdk';
 import rateLimit from 'express-rate-limit';
 import crypto from 'crypto';
@@ -419,6 +419,93 @@ async function closeGeminiSession(callControlId: string) {
 }
 
 // ============================================
+// GEMINI TRANSCRIPT ANALYSIS
+// ============================================
+
+const VALID_CALL_OUTCOMES = ['ANSWERED', 'CONFIRMED', 'RESCHEDULED', 'CANCELED', 'VOICEMAIL', 'NO_ANSWER', 'FAILED'] as const;
+
+async function analyzeTranscriptWithGemini(
+  transcript: Array<{ role: string; content: string }> | null
+): Promise<{ summary: string; call_outcome: string } | null> {
+  if (!googleAI) {
+    log.debug('Gemini transcript analysis skipped: no API key');
+    return null;
+  }
+
+  if (!transcript || !Array.isArray(transcript)) {
+    log.debug('Gemini transcript analysis skipped: no transcript');
+    return null;
+  }
+
+  // Filter to only agent/user conversation messages (exclude system)
+  const conversationMessages = transcript.filter(
+    (msg) => msg.role === 'agent' || msg.role === 'user'
+  );
+
+  if (conversationMessages.length < 2) {
+    log.debug('Gemini transcript analysis skipped: too few messages', { count: conversationMessages.length });
+    return null;
+  }
+
+  try {
+    const formattedTranscript = conversationMessages
+      .map((msg) => `${msg.role.toUpperCase()}: ${msg.content}`)
+      .join('\n');
+
+    const response = await googleAI.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: `Analyze this phone call transcript between an AI appointment reminder agent and a customer.\n\nTranscript:\n${formattedTranscript}\n\nProvide a brief summary and determine the call outcome.`,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            summary: {
+              type: Type.STRING,
+              description: 'A concise 1-3 sentence summary of the call from the business owner perspective. Focus on what happened and the result.',
+            },
+            call_outcome: {
+              type: Type.STRING,
+              description: 'The outcome of the call.',
+              enum: [...VALID_CALL_OUTCOMES],
+            },
+          },
+          required: ['summary', 'call_outcome'],
+        },
+      },
+    });
+
+    const text = response.text;
+    if (!text) {
+      log.error('Gemini transcript analysis: empty response');
+      return null;
+    }
+
+    const parsed = JSON.parse(text);
+
+    if (!parsed.summary || !parsed.call_outcome) {
+      log.error('Gemini transcript analysis: missing fields', parsed);
+      return null;
+    }
+
+    if (!VALID_CALL_OUTCOMES.includes(parsed.call_outcome)) {
+      log.error('Gemini transcript analysis: invalid call_outcome', { call_outcome: parsed.call_outcome });
+      return null;
+    }
+
+    log.info('Gemini transcript analysis complete', {
+      summary_length: parsed.summary.length,
+      call_outcome: parsed.call_outcome,
+    });
+
+    return { summary: parsed.summary, call_outcome: parsed.call_outcome };
+  } catch (error) {
+    log.error('Gemini transcript analysis failed', error);
+    return null;
+  }
+}
+
+// ============================================
 // EXPRESS APP
 // ============================================
 
@@ -511,7 +598,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.use(express.json({ limit: '10kb' })); // Limit request body size
+app.use(express.json({ limit: '1mb' })); // Limit request body size (transcripts can be large)
 app.use(generalRateLimiter); // Apply general rate limiting
 
 // Request logging middleware
@@ -658,6 +745,7 @@ app.post('/api/appointments/:id/trigger-call', authenticateUser, callRateLimiter
           customer_name: appointment.customer?.name,
           business_name: appointment.business?.name,
           business_category: businessCategory,
+          business_timezone: appointment.business?.timezone || 'America/Los_Angeles',
         },
         template: template ? {
           category: template.category,
@@ -731,6 +819,7 @@ app.post('/api/appointments/:id/trigger-call', authenticateUser, callRateLimiter
       { name: 'X-Appointment-Time', value: appointment.scheduled_at },
       { name: 'X-Business-Name', value: appointment.business?.name || 'Our office' },
       { name: 'X-Business-Category', value: businessCategory },
+      { name: 'X-Business-Timezone', value: appointment.business?.timezone || 'America/Los_Angeles' },
     ],
   });
 
@@ -775,6 +864,7 @@ app.post('/api/webhooks/telnyx/call-events', validateTelnyxWebhook, asyncHandler
   const appointmentTitle = getHeader('X-Appointment-Title') || 'your appointment';
   const appointmentTime = getHeader('X-Appointment-Time');
   const businessName = getHeader('X-Business-Name') || 'our office';
+  const businessTimezone = getHeader('X-Business-Timezone');
 
   switch (eventType) {
     case 'call.initiated':
@@ -790,11 +880,12 @@ app.post('/api/webhooks/telnyx/call-events', validateTelnyxWebhook, asyncHandler
         .update({ call_outcome: 'ANSWERED' })
         .eq('sip_call_id', callControlId);
       
-      // Format the appointment time nicely
-      const formattedTime = appointmentTime 
+      // Format the appointment time in business timezone
+      const formattedTime = appointmentTime
         ? new Date(appointmentTime).toLocaleString('en-US', {
+            timeZone: businessTimezone || 'America/Los_Angeles',
             weekday: 'long',
-            month: 'long', 
+            month: 'long',
             day: 'numeric',
             hour: 'numeric',
             minute: '2-digit'
@@ -1130,17 +1221,30 @@ app.post('/api/calls/:id/transcript', authenticateInternal, asyncHandler(async (
 
   log.info('Saving transcript', { id, duration_sec, call_outcome });
 
+  // Attempt Gemini AI analysis of the transcript
+  const geminiResult = await analyzeTranscriptWithGemini(transcript);
+
+  // Use Gemini results if available, otherwise fall back to agent-provided values
+  const finalSummary = geminiResult?.summary || summary || null;
+  const finalOutcome = geminiResult?.call_outcome || (call_outcome ? call_outcome.toUpperCase() : null);
+
+  if (geminiResult) {
+    log.info('Using Gemini AI summary', { id, outcome: finalOutcome });
+  } else {
+    log.info('Using agent-provided summary', { id, outcome: finalOutcome });
+  }
+
   const updateData: any = {
     transcript: transcript || null,
-    summary: summary || null,
+    summary: finalSummary,
   };
 
   if (duration_sec !== undefined) {
     updateData.duration_sec = duration_sec;
   }
 
-  if (call_outcome) {
-    updateData.call_outcome = call_outcome.toUpperCase();
+  if (finalOutcome) {
+    updateData.call_outcome = finalOutcome;
   }
 
   const { data: call, error } = await supabase
@@ -1622,6 +1726,7 @@ async function checkAndTriggerReminders() {
               customer_name: appointment.customer?.name,
               business_name: appointment.business?.name,
               business_category: businessCategory,
+              business_timezone: appointment.business?.timezone || 'America/Los_Angeles',
             },
             template: template ? {
               category: template.category,
@@ -1676,6 +1781,7 @@ async function checkAndTriggerReminders() {
               { name: 'X-Appointment-Time', value: appointment.scheduled_at },
               { name: 'X-Business-Name', value: appointment.business?.name || 'Our office' },
               { name: 'X-Business-Category', value: businessCategory },
+              { name: 'X-Business-Timezone', value: appointment.business?.timezone || 'America/Los_Angeles' },
             ],
           });
 

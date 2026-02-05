@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS b2b_businesses (
   email TEXT,
   owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   voice_preference TEXT DEFAULT 'Puck',
+  timezone TEXT DEFAULT 'America/Los_Angeles',
   subscription_tier TEXT DEFAULT 'FREE' CHECK (subscription_tier IN ('FREE', 'STARTER', 'PROFESSIONAL', 'ENTERPRISE')),
   subscription_status TEXT DEFAULT 'ACTIVE' CHECK (subscription_status IN ('ACTIVE', 'PAST_DUE', 'CANCELED', 'TRIALING')),
   created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -227,3 +228,17 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION handle_new_user();
+
+-- ============================================
+-- IDEMPOTENT COLUMN ADDITIONS (for existing databases)
+-- ============================================
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'b2b_businesses' AND column_name = 'timezone'
+  ) THEN
+    ALTER TABLE b2b_businesses ADD COLUMN timezone TEXT DEFAULT 'America/Los_Angeles';
+  END IF;
+END $$;
