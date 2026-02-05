@@ -7,6 +7,8 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { GoogleGenAI, Modality } from '@google/genai';
 import { SipClient, RoomServiceClient, AgentDispatchClient } from 'livekit-server-sdk';
+import rateLimit from 'express-rate-limit';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -38,6 +40,7 @@ const config = {
   telnyxApiKey: process.env.TELNYX_API_KEY!,
   telnyxConnectionId: process.env.TELNYX_CONNECTION_ID!,
   telnyxPhoneNumber: process.env.TELNYX_PHONE_NUMBER!,
+  telnyxWebhookSecret: process.env.TELNYX_WEBHOOK_SECRET || '',
   googleAiApiKey: process.env.GOOGLE_AI_API_KEY,
   nodeEnv: process.env.NODE_ENV || 'development',
   // LiveKit config (optional - for Gemini voice)
@@ -46,6 +49,9 @@ const config = {
   livekitApiSecret: process.env.LIVEKIT_API_SECRET || '',
   livekitSipTrunkId: process.env.SIP_TRUNK_ID || '',
   livekitAgentName: process.env.LIVEKIT_AGENT_NAME || 'nemo_b2b_agent',
+  // Security config
+  allowedOrigins: process.env.ALLOWED_ORIGINS?.split(',') || [],
+  internalApiKey: process.env.INTERNAL_API_KEY || '',
 };
 
 // LiveKit clients (initialized if config is present)
@@ -84,6 +90,166 @@ const log = {
     }
   },
 };
+
+// ============================================
+// SECURITY MIDDLEWARE
+// ============================================
+
+// Phone number validation regex (E.164 format)
+const E164_PHONE_REGEX = /^\+?[1-9]\d{1,14}$/;
+
+// UUID validation regex
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// Validate phone number format
+function isValidPhoneNumber(phone: string): boolean {
+  return E164_PHONE_REGEX.test(phone);
+}
+
+// Validate UUID format
+function isValidUUID(id: string): boolean {
+  return UUID_REGEX.test(id);
+}
+
+// Extended Request type with user info
+interface AuthenticatedRequest extends Request {
+  user?: {
+    id: string;
+    business_id?: string;
+    email?: string;
+  };
+}
+
+// Authentication middleware using Supabase JWT
+const authenticateUser = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Missing or invalid authorization header' });
+    }
+
+    const token = authHeader.substring(7);
+
+    // Verify the JWT with Supabase
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      log.debug('Auth failed', { error: error?.message });
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    // Get the user's business
+    const { data: business } = await supabase
+      .from('b2b_businesses')
+      .select('id')
+      .eq('owner_id', user.id)
+      .single();
+
+    req.user = {
+      id: user.id,
+      email: user.email,
+      business_id: business?.id,
+    };
+
+    next();
+  } catch (error) {
+    log.error('Authentication error', error);
+    return res.status(500).json({ error: 'Authentication failed' });
+  }
+};
+
+// Internal API key authentication (for agent callbacks)
+const authenticateInternal = (req: Request, res: Response, next: NextFunction) => {
+  // Skip auth if no internal API key is configured (development mode)
+  if (!config.internalApiKey) {
+    return next();
+  }
+
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing authorization header' });
+  }
+
+  const token = authHeader.substring(7);
+
+  if (token !== config.internalApiKey) {
+    return res.status(403).json({ error: 'Invalid API key' });
+  }
+
+  next();
+};
+
+// Verify business ownership for IDOR protection
+const verifyBusinessOwnership = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  const businessId = req.query.business_id as string || req.body?.business_id;
+
+  if (!businessId) {
+    return next();
+  }
+
+  if (!req.user?.business_id) {
+    return res.status(403).json({ error: 'No business associated with user' });
+  }
+
+  if (businessId !== req.user.business_id) {
+    log.debug('Business ownership check failed', {
+      requested: businessId,
+      owned: req.user.business_id
+    });
+    return res.status(403).json({ error: 'Access denied to this business data' });
+  }
+
+  next();
+};
+
+// Telnyx webhook signature validation
+const validateTelnyxWebhook = (req: Request, res: Response, next: NextFunction) => {
+  // Skip validation if no webhook secret configured (development)
+  if (!config.telnyxWebhookSecret) {
+    log.debug('Telnyx webhook validation skipped (no secret configured)');
+    return next();
+  }
+
+  const signature = req.headers['telnyx-signature-ed25519'] as string;
+  const timestamp = req.headers['telnyx-timestamp'] as string;
+
+  if (!signature || !timestamp) {
+    log.error('Missing Telnyx webhook signature headers');
+    return res.status(401).json({ error: 'Missing webhook signature' });
+  }
+
+  // Verify timestamp is recent (within 5 minutes)
+  const timestampAge = Math.abs(Date.now() - parseInt(timestamp) * 1000);
+  if (timestampAge > 5 * 60 * 1000) {
+    log.error('Telnyx webhook timestamp too old', { age: timestampAge });
+    return res.status(401).json({ error: 'Webhook timestamp expired' });
+  }
+
+  // For production, implement full Ed25519 signature verification
+  // This requires the telnyx public key and crypto.verify
+  // For now, we do basic timestamp validation
+
+  next();
+};
+
+// Rate limiters
+const callRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 5, // 5 requests per minute
+  message: { error: 'Too many call requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const generalRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 100, // 100 requests per minute
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // ============================================
 // CLIENTS
@@ -308,9 +474,40 @@ wss.on('connection', (ws: WebSocket, req) => {
   });
 });
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+// Middleware - Security
+const corsOptions = {
+  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    // Allow requests with no origin (like mobile apps or Postman in dev)
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    // In development, allow all origins
+    if (config.nodeEnv === 'development') {
+      return callback(null, true);
+    }
+
+    // In production, check against whitelist
+    if (config.allowedOrigins.length === 0) {
+      log.error('ALLOWED_ORIGINS not configured for production');
+      return callback(null, true); // Fall back to allowing (log warning)
+    }
+
+    if (config.allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    log.debug('CORS blocked request from origin', { origin });
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+
+app.use(cors(corsOptions));
+app.use(express.json({ limit: '10kb' })); // Limit request body size
+app.use(generalRateLimiter); // Apply general rate limiting
 
 // Request logging middleware
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -325,11 +522,15 @@ const asyncHandler = (fn: Function) => (req: Request, res: Response, next: NextF
 
 // Global error handler
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-  log.error('Unhandled error', err);
-  res.status(500).json({ 
-    error: 'Internal server error',
-    message: config.nodeEnv === 'development' ? err.message : undefined
-  });
+  // Don't log full error details to avoid leaking sensitive info
+  log.error('Unhandled error', { message: err.message, name: err.name });
+
+  // Handle CORS errors specifically
+  if (err.message === 'Not allowed by CORS') {
+    return res.status(403).json({ error: 'Origin not allowed' });
+  }
+
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 // ============================================
@@ -348,8 +549,8 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Get upcoming appointments that need reminders
-app.get('/api/appointments/pending-reminders', asyncHandler(async (req: Request, res: Response) => {
+// Get upcoming appointments that need reminders (internal use by scheduler)
+app.get('/api/appointments/pending-reminders', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
   const now = new Date();
   
   // Fetch appointments that are scheduled and within the next 24 hours
@@ -385,8 +586,13 @@ app.get('/api/appointments/pending-reminders', asyncHandler(async (req: Request,
 }));
 
 // Trigger a reminder call for an appointment
-app.post('/api/appointments/:id/trigger-call', asyncHandler(async (req: Request, res: Response) => {
+app.post('/api/appointments/:id/trigger-call', authenticateUser, callRateLimiter, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
+
+  // Validate appointment ID format
+  if (!isValidUUID(id)) {
+    return res.status(400).json({ error: 'Invalid appointment ID format' });
+  }
   
   // Get appointment details with business category
   const { data: appointment, error: fetchError } = await supabase
@@ -548,7 +754,7 @@ app.post('/api/appointments/:id/trigger-call', asyncHandler(async (req: Request,
 }));
 
 // Webhook endpoint for Telnyx call events
-app.post('/api/webhooks/telnyx/call-events', asyncHandler(async (req: Request, res: Response) => {
+app.post('/api/webhooks/telnyx/call-events', validateTelnyxWebhook, asyncHandler(async (req: Request, res: Response) => {
   const event = req.body;
   const eventType = event.data?.event_type;
   const callControlId = event.data?.payload?.call_control_id;
@@ -699,12 +905,23 @@ app.post('/api/webhooks/telnyx/call-events', asyncHandler(async (req: Request, r
 }));
 
 // Get call logs for a business
-app.get('/api/call-logs', asyncHandler(async (req: Request, res: Response) => {
+app.get('/api/call-logs', authenticateUser, verifyBusinessOwnership, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const { business_id, limit = '50' } = req.query;
-  
-  if (!business_id) {
+
+  // Use authenticated user's business_id if not provided
+  const targetBusinessId = business_id as string || req.user?.business_id;
+
+  if (!targetBusinessId) {
     return res.status(400).json({ error: 'business_id query parameter is required' });
   }
+
+  // Validate business_id format
+  if (!isValidUUID(targetBusinessId)) {
+    return res.status(400).json({ error: 'Invalid business_id format' });
+  }
+
+  // Validate and sanitize limit
+  const parsedLimit = Math.min(Math.max(1, parseInt(limit as string) || 50), 100);
 
   const { data: logs, error } = await supabase
     .from('b2b_call_logs')
@@ -713,9 +930,9 @@ app.get('/api/call-logs', asyncHandler(async (req: Request, res: Response) => {
       customer:b2b_customers(name, phone),
       appointment:b2b_appointments(title, scheduled_at, status)
     `)
-    .eq('business_id', business_id)
+    .eq('business_id', targetBusinessId)
     .order('created_at', { ascending: false })
-    .limit(parseInt(limit as string));
+    .limit(parsedLimit);
 
   if (error) {
     log.error('Failed to fetch call logs', error);
@@ -726,8 +943,13 @@ app.get('/api/call-logs', asyncHandler(async (req: Request, res: Response) => {
 }));
 
 // Get a single call log with full transcript
-app.get('/api/calls/:id', asyncHandler(async (req: Request, res: Response) => {
+app.get('/api/calls/:id', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
+
+  // Validate call ID format
+  if (!isValidUUID(id)) {
+    return res.status(400).json({ error: 'Invalid call ID format' });
+  }
 
   const { data: call, error } = await supabase
     .from('b2b_call_logs')
@@ -748,11 +970,16 @@ app.get('/api/calls/:id', asyncHandler(async (req: Request, res: Response) => {
     return res.status(404).json({ error: 'Call not found' });
   }
 
+  // Verify ownership - check if call belongs to user's business
+  if (req.user?.business_id && call.business_id !== req.user.business_id) {
+    return res.status(403).json({ error: 'Access denied to this call' });
+  }
+
   res.json({ call });
 }));
 
 // Find call log by room name (used by agent to get call_log_id)
-app.get('/api/calls/by-room/:roomName', asyncHandler(async (req: Request, res: Response) => {
+app.get('/api/calls/by-room/:roomName', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
   const { roomName } = req.params;
 
   const { data: call, error } = await supabase
@@ -779,9 +1006,14 @@ app.get('/api/calls/by-room/:roomName', asyncHandler(async (req: Request, res: R
 // ==========================================
 
 // Update appointment status (called by agent on confirm/cancel)
-app.patch('/api/appointments/:id/status', asyncHandler(async (req: Request, res: Response) => {
+app.patch('/api/appointments/:id/status', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const { status, notes, call_log_id } = req.body;
+
+  // Validate appointment ID format
+  if (!isValidUUID(id)) {
+    return res.status(400).json({ error: 'Invalid appointment ID format' });
+  }
 
   // Validate status
   const validStatuses = ['SCHEDULED', 'CONFIRMED', 'RESCHEDULED', 'CANCELED', 'COMPLETED', 'NO_SHOW'];
@@ -827,9 +1059,14 @@ app.patch('/api/appointments/:id/status', asyncHandler(async (req: Request, res:
 }));
 
 // Request reschedule (called by agent when customer wants to reschedule)
-app.post('/api/appointments/:id/reschedule', asyncHandler(async (req: Request, res: Response) => {
+app.post('/api/appointments/:id/reschedule', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const { preferred_time, reason, call_log_id } = req.body;
+
+  // Validate appointment ID format
+  if (!isValidUUID(id)) {
+    return res.status(400).json({ error: 'Invalid appointment ID format' });
+  }
 
   log.info('Reschedule requested', { id, preferred_time, reason, call_log_id });
 
@@ -877,9 +1114,14 @@ app.post('/api/appointments/:id/reschedule', asyncHandler(async (req: Request, r
 }));
 
 // Save call transcript (called by agent at end of call)
-app.post('/api/calls/:id/transcript', asyncHandler(async (req: Request, res: Response) => {
+app.post('/api/calls/:id/transcript', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const { transcript, summary, duration_sec, call_outcome } = req.body;
+
+  // Validate call ID format
+  if (!isValidUUID(id)) {
+    return res.status(400).json({ error: 'Invalid call ID format' });
+  }
 
   log.info('Saving transcript', { id, duration_sec, call_outcome });
 
@@ -912,16 +1154,21 @@ app.post('/api/calls/:id/transcript', asyncHandler(async (req: Request, res: Res
 }));
 
 // Manual test call endpoint (uses basic TTS)
-app.post('/api/test-call', asyncHandler(async (req: Request, res: Response) => {
+app.post('/api/test-call', authenticateUser, callRateLimiter, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const { phone, message, voice_preference, business_name, business_id, business_category } = req.body;
-  
+
   if (!phone) {
     return res.status(400).json({ error: 'phone is required in request body' });
   }
 
   // Validate phone number format
-  if (!phone.match(/^\+?[1-9]\d{1,14}$/)) {
+  if (!isValidPhoneNumber(phone)) {
     return res.status(400).json({ error: 'Invalid phone number format. Use E.164 format (e.g., +1234567890)' });
+  }
+
+  // Validate business_id if provided
+  if (business_id && !isValidUUID(business_id)) {
+    return res.status(400).json({ error: 'Invalid business_id format' });
   }
 
   log.info('Making test call', { phone, livekitEnabled, business_category });
@@ -1026,7 +1273,7 @@ app.post('/api/test-call', asyncHandler(async (req: Request, res: Response) => {
 }));
 
 // Test call webhook (basic TTS)
-app.post('/api/webhooks/telnyx/test-call', asyncHandler(async (req: Request, res: Response) => {
+app.post('/api/webhooks/telnyx/test-call', validateTelnyxWebhook, asyncHandler(async (req: Request, res: Response) => {
   const event = req.body;
   const eventType = event.data?.event_type;
   const callControlId = event.data?.payload?.call_control_id;
@@ -1049,19 +1296,19 @@ app.post('/api/webhooks/telnyx/test-call', asyncHandler(async (req: Request, res
 // ============================================
 
 // AI test call endpoint - uses Gemini Live for natural conversation
-app.post('/api/ai-call', asyncHandler(async (req: Request, res: Response) => {
+app.post('/api/ai-call', authenticateUser, callRateLimiter, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const { phone, systemPrompt } = req.body;
-  
+
   if (!phone) {
     return res.status(400).json({ error: 'phone is required in request body' });
   }
 
   if (!googleAI) {
-    return res.status(503).json({ error: 'Gemini Live not configured - missing GOOGLE_AI_API_KEY' });
+    return res.status(503).json({ error: 'Gemini Live not configured' });
   }
 
   // Validate phone number format
-  if (!phone.match(/^\+?[1-9]\d{1,14}$/)) {
+  if (!isValidPhoneNumber(phone)) {
     return res.status(400).json({ error: 'Invalid phone number format. Use E.164 format (e.g., +1234567890)' });
   }
 
@@ -1092,7 +1339,7 @@ If they want to confirm, thank them warmly. If they want to reschedule, be under
 }));
 
 // AI call webhook - handles Gemini Live streaming
-app.post('/api/webhooks/telnyx/ai-call', asyncHandler(async (req: Request, res: Response) => {
+app.post('/api/webhooks/telnyx/ai-call', validateTelnyxWebhook, asyncHandler(async (req: Request, res: Response) => {
   const event = req.body;
   const eventType = event.data?.event_type;
   const callControlId = event.data?.payload?.call_control_id;
@@ -1188,7 +1435,7 @@ app.post('/api/webhooks/telnyx/ai-call', asyncHandler(async (req: Request, res: 
 // ============================================
 
 // Get all available templates (for admin/debugging)
-app.get('/api/templates', asyncHandler(async (req: Request, res: Response) => {
+app.get('/api/templates', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const { data: templates, error } = await supabase
     .from('b2b_reminder_templates')
     .select('*')
@@ -1203,7 +1450,7 @@ app.get('/api/templates', asyncHandler(async (req: Request, res: Response) => {
 }));
 
 // Get template by category
-app.get('/api/templates/:category', asyncHandler(async (req: Request, res: Response) => {
+app.get('/api/templates/:category', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const category = req.params.category as string;
   
   const { data: template, error } = await supabase
