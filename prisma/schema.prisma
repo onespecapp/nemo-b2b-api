@@ -19,25 +19,27 @@ model Business {
   name  String
   phone String?
   email String?
-  
+
   // Supabase auth user who owns this business
   owner_id String
-  
+
   // Business category (determines call templates)
   category BusinessCategory @default(OTHER)
-  
+
   // AI Voice settings
   voice_preference String @default("Aoede") // Puck, Charon, Kore, Fenrir, Aoede
-  
+
   // Subscription
   subscription_tier   SubscriptionTier @default(FREE)
   subscription_status SubscriptionStatus @default(ACTIVE)
-  
+
   // Relations
-  customers    Customer[]
-  appointments Appointment[]
-  call_logs    CallLog[]
-  
+  customers      Customer[]
+  appointments   Appointment[]
+  call_logs      CallLog[]
+  campaigns      Campaign[]
+  campaign_calls CampaignCall[]
+
   created_at DateTime @default(now())
   updated_at DateTime @default(now()) @updatedAt
 
@@ -49,13 +51,13 @@ model Business {
 // ============================================
 model ReminderTemplate {
   id String @id @default(cuid())
-  
+
   // Which category this template is for
   category BusinessCategory @unique
-  
+
   // Display name for the category
   category_label String
-  
+
   // Template content
   system_prompt    String  // Full system prompt for the AI
   greeting         String  // Opening message
@@ -63,10 +65,10 @@ model ReminderTemplate {
   reschedule_ask   String  // How to ask about rescheduling
   closing          String  // Closing message
   voicemail        String  // Message to leave on voicemail
-  
+
   // Placeholder info (for UI/docs)
   placeholders Json? // e.g., {"business_name": "Your Barbershop", "service": "haircut"}
-  
+
   created_at DateTime @default(now())
   updated_at DateTime @default(now()) @updatedAt
 
@@ -82,15 +84,16 @@ model Customer {
   phone String
   email String?
   notes String?
-  
+
   // Business relation
   business_id String
   business    Business @relation(fields: [business_id], references: [id], onDelete: Cascade)
-  
+
   // Relations
-  appointments Appointment[]
-  call_logs    CallLog[]
-  
+  appointments   Appointment[]
+  call_logs      CallLog[]
+  campaign_calls CampaignCall[]
+
   created_at DateTime @default(now())
   updated_at DateTime @default(now()) @updatedAt
 
@@ -106,23 +109,23 @@ model Appointment {
   description String?
   scheduled_at DateTime
   duration_min Int      @default(30)
-  
+
   // Reminder settings
   reminder_enabled Boolean @default(true)
   reminder_hours   Int     @default(24) // Hours before to call
-  
+
   // Status
   status AppointmentStatus @default(SCHEDULED)
-  
+
   // Relations
   business_id String
   business    Business @relation(fields: [business_id], references: [id], onDelete: Cascade)
-  
+
   customer_id String
   customer    Customer @relation(fields: [customer_id], references: [id], onDelete: Cascade)
-  
+
   call_logs CallLog[]
-  
+
   created_at DateTime @default(now())
   updated_at DateTime @default(now()) @updatedAt
 
@@ -134,33 +137,134 @@ model Appointment {
 // ============================================
 model CallLog {
   id String @id @default(cuid())
-  
+
   // Call details
   call_type    CallType
   call_outcome CallOutcome?
   duration_sec Int?
-  
+
   // LiveKit/SIP details
   room_name    String?
   sip_call_id  String?
-  
+
   // Transcript
   transcript   Json?
   summary      String?
-  
+
+  // Campaign call link (if this call was initiated by a campaign)
+  campaign_call_id String?
+  campaign_call    CampaignCall? @relation(fields: [campaign_call_id], references: [id], onDelete: SetNull)
+
   // Relations
   business_id String
   business    Business @relation(fields: [business_id], references: [id], onDelete: Cascade)
-  
+
   customer_id String?
   customer    Customer? @relation(fields: [customer_id], references: [id], onDelete: SetNull)
-  
+
   appointment_id String?
   appointment    Appointment? @relation(fields: [appointment_id], references: [id], onDelete: SetNull)
-  
+
   created_at DateTime @default(now())
 
   @@map("b2b_call_logs")
+}
+
+// ============================================
+// CAMPAIGN - Automated outbound call campaigns
+// ============================================
+model Campaign {
+  id          String       @id @default(cuid())
+  business_id String
+  business    Business     @relation(fields: [business_id], references: [id], onDelete: Cascade)
+
+  campaign_type CampaignType
+  name          String
+  enabled       Boolean @default(false)
+
+  // Type-specific config (e.g. { "days_since_last_appointment": 30 })
+  settings Json @default("{}")
+
+  // Call window (HH:MM in business timezone)
+  call_window_start String @default("09:00")
+  call_window_end   String @default("17:00")
+  allowed_days      String @default("MON,TUE,WED,THU,FRI") // comma-separated
+
+  // Throttling
+  max_concurrent_calls      Int @default(2)
+  min_minutes_between_calls Int @default(5)
+
+  // How often a customer can be re-targeted
+  cycle_frequency_days Int @default(30)
+
+  // Scheduler tracking
+  last_run_at DateTime?
+  next_run_at DateTime?
+
+  // Relations
+  campaign_calls CampaignCall[]
+
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+
+  @@unique([business_id, campaign_type])
+  @@map("b2b_campaigns")
+}
+
+// ============================================
+// CAMPAIGN CALL - Individual outreach to a customer
+// ============================================
+model CampaignCall {
+  id          String   @id @default(cuid())
+  campaign_id String
+  campaign    Campaign @relation(fields: [campaign_id], references: [id], onDelete: Cascade)
+
+  customer_id String
+  customer    Customer @relation(fields: [customer_id], references: [id], onDelete: Cascade)
+
+  business_id String
+  business    Business @relation(fields: [business_id], references: [id], onDelete: Cascade)
+
+  // Linked after call is placed
+  call_logs CallLog[]
+
+  // Status tracking
+  status      CampaignCallStatus @default(PENDING)
+  skip_reason String?
+  result_data Json? // e.g. { "booked_appointment": true }
+
+  // Scheduling
+  scheduled_for DateTime?
+  started_at    DateTime?
+  completed_at  DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+
+  @@map("b2b_campaign_calls")
+}
+
+// ============================================
+// CAMPAIGN TEMPLATE - Campaign-specific call scripts
+// ============================================
+model CampaignTemplate {
+  id String @id @default(cuid())
+
+  campaign_type     CampaignType
+  business_category BusinessCategory
+
+  // Template content
+  system_prompt String
+  greeting      String
+  goal_prompt   String  // What the agent should try to achieve
+  closing       String
+  voicemail     String
+
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+
+  @@unique([campaign_type, business_category])
+  @@map("b2b_campaign_templates")
 }
 
 // ============================================
@@ -192,10 +296,13 @@ enum AppointmentStatus {
 }
 
 enum CallType {
-  REMINDER      // Scheduled appointment reminder
-  TEST          // Test call from dashboard
-  FOLLOW_UP     // Follow-up call
-  CONFIRMATION  // Confirmation call
+  REMINDER         // Scheduled appointment reminder
+  TEST             // Test call from dashboard
+  FOLLOW_UP        // Follow-up call
+  CONFIRMATION     // Confirmation call
+  RE_ENGAGEMENT    // Campaign: win back lapsed customers
+  REVIEW_COLLECTION // Campaign: collect Google reviews
+  NO_SHOW_FOLLOWUP // Campaign: follow up on no-shows
 }
 
 enum CallOutcome {
@@ -207,6 +314,9 @@ enum CallOutcome {
   CONFIRMED
   RESCHEDULED
   CANCELED
+  BOOKED       // Customer booked a new appointment
+  REVIEW_SENT  // Review link was sent
+  DECLINED     // Customer declined the offer
 }
 
 enum BusinessCategory {
@@ -220,4 +330,19 @@ enum BusinessCategory {
   FITNESS
   TUTORING
   OTHER
+}
+
+enum CampaignType {
+  RE_ENGAGEMENT
+  REVIEW_COLLECTION
+  NO_SHOW_FOLLOWUP
+}
+
+enum CampaignCallStatus {
+  PENDING
+  QUEUED
+  IN_PROGRESS
+  COMPLETED
+  SKIPPED
+  FAILED
 }

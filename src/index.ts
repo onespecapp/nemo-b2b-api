@@ -667,8 +667,8 @@ app.get('/api/appointments/pending-reminders', authenticateInternal, asyncHandle
   // Filter to only those that need reminders now
   const pendingReminders = appointments?.filter(apt => {
     const scheduledAt = new Date(apt.scheduled_at);
-    // Use reminder_minutes_before (default 30 minutes if not set)
-    const reminderMinutes = apt.reminder_minutes_before ?? 30;
+    // Use reminder_hours (default 24 hours if not set), convert to minutes
+    const reminderMinutes = (apt.reminder_hours ?? 24) * 60;
     const reminderTime = new Date(scheduledAt.getTime() - reminderMinutes * 60 * 1000);
     return reminderTime <= now;
   }) || [];
@@ -1602,6 +1602,463 @@ app.get('/api/business-categories', (req: Request, res: Response) => {
   res.json({ categories });
 });
 
+// ============================================
+// CAMPAIGN ENDPOINTS
+// ============================================
+
+// List campaigns for business
+app.get('/api/campaigns', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const businessId = req.user?.business_id;
+  if (!businessId) {
+    return res.status(400).json({ error: 'No business associated with user' });
+  }
+
+  const { data: campaigns, error } = await supabase
+    .from('b2b_campaigns')
+    .select('*')
+    .eq('business_id', businessId)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    log.error('Failed to fetch campaigns', error);
+    throw error;
+  }
+
+  res.json({ campaigns: campaigns || [], count: campaigns?.length || 0 });
+}));
+
+// Get single campaign with stats
+app.get('/api/campaigns/:id', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  const businessId = req.user?.business_id;
+
+  const { data: campaign, error } = await supabase
+    .from('b2b_campaigns')
+    .select('*')
+    .eq('id', id)
+    .eq('business_id', businessId)
+    .single();
+
+  if (error || !campaign) {
+    return res.status(404).json({ error: 'Campaign not found' });
+  }
+
+  // Fetch quick stats
+  const { count: totalCalls } = await supabase
+    .from('b2b_campaign_calls')
+    .select('*', { count: 'exact', head: true })
+    .eq('campaign_id', id);
+
+  const { count: completedCalls } = await supabase
+    .from('b2b_campaign_calls')
+    .select('*', { count: 'exact', head: true })
+    .eq('campaign_id', id)
+    .eq('status', 'COMPLETED');
+
+  const { count: pendingCalls } = await supabase
+    .from('b2b_campaign_calls')
+    .select('*', { count: 'exact', head: true })
+    .eq('campaign_id', id)
+    .in('status', ['PENDING', 'QUEUED']);
+
+  res.json({
+    campaign,
+    stats: {
+      total_calls: totalCalls || 0,
+      completed_calls: completedCalls || 0,
+      pending_calls: pendingCalls || 0,
+    },
+  });
+}));
+
+// Create campaign (one per type per business)
+app.post('/api/campaigns', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const businessId = req.user?.business_id;
+  if (!businessId) {
+    return res.status(400).json({ error: 'No business associated with user' });
+  }
+
+  const {
+    campaign_type,
+    name,
+    settings,
+    call_window_start,
+    call_window_end,
+    allowed_days,
+    max_concurrent_calls,
+    min_minutes_between_calls,
+    cycle_frequency_days,
+  } = req.body;
+
+  const validTypes = ['RE_ENGAGEMENT', 'REVIEW_COLLECTION', 'NO_SHOW_FOLLOWUP'];
+  if (!campaign_type || !validTypes.includes(campaign_type)) {
+    return res.status(400).json({ error: `Invalid campaign_type. Must be one of: ${validTypes.join(', ')}` });
+  }
+
+  if (!name || typeof name !== 'string' || name.trim().length === 0) {
+    return res.status(400).json({ error: 'name is required' });
+  }
+
+  // Check for existing campaign of this type
+  const { data: existing } = await supabase
+    .from('b2b_campaigns')
+    .select('id')
+    .eq('business_id', businessId)
+    .eq('campaign_type', campaign_type)
+    .single();
+
+  if (existing) {
+    return res.status(409).json({ error: 'A campaign of this type already exists for your business' });
+  }
+
+  const { data: campaign, error } = await supabase
+    .from('b2b_campaigns')
+    .insert({
+      business_id: businessId,
+      campaign_type,
+      name: name.trim(),
+      settings: settings || {},
+      call_window_start: call_window_start || '09:00',
+      call_window_end: call_window_end || '17:00',
+      allowed_days: allowed_days || 'MON,TUE,WED,THU,FRI',
+      max_concurrent_calls: max_concurrent_calls || 2,
+      min_minutes_between_calls: min_minutes_between_calls || 5,
+      cycle_frequency_days: cycle_frequency_days || 30,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    log.error('Failed to create campaign', error);
+    throw error;
+  }
+
+  log.info('Campaign created', { id: campaign.id, type: campaign_type, business: businessId });
+  res.status(201).json({ campaign });
+}));
+
+// Update campaign settings
+app.patch('/api/campaigns/:id', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  const businessId = req.user?.business_id;
+
+  // Only allow updating specific fields
+  const allowedFields = [
+    'name', 'settings', 'call_window_start', 'call_window_end',
+    'allowed_days', 'max_concurrent_calls', 'min_minutes_between_calls',
+    'cycle_frequency_days',
+  ];
+
+  const updates: Record<string, any> = {};
+  for (const field of allowedFields) {
+    if (req.body[field] !== undefined) {
+      updates[field] = req.body[field];
+    }
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'No valid fields to update' });
+  }
+
+  const { data: campaign, error } = await supabase
+    .from('b2b_campaigns')
+    .update(updates)
+    .eq('id', id)
+    .eq('business_id', businessId)
+    .select()
+    .single();
+
+  if (error) {
+    log.error('Failed to update campaign', error);
+    throw error;
+  }
+
+  if (!campaign) {
+    return res.status(404).json({ error: 'Campaign not found' });
+  }
+
+  res.json({ campaign });
+}));
+
+// Delete campaign
+app.delete('/api/campaigns/:id', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  const businessId = req.user?.business_id;
+
+  const { error } = await supabase
+    .from('b2b_campaigns')
+    .delete()
+    .eq('id', id)
+    .eq('business_id', businessId);
+
+  if (error) {
+    log.error('Failed to delete campaign', error);
+    throw error;
+  }
+
+  res.json({ success: true });
+}));
+
+// Toggle campaign enabled/disabled
+app.post('/api/campaigns/:id/toggle', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  const businessId = req.user?.business_id;
+
+  // Get current state
+  const { data: campaign, error: fetchError } = await supabase
+    .from('b2b_campaigns')
+    .select('enabled')
+    .eq('id', id)
+    .eq('business_id', businessId)
+    .single();
+
+  if (fetchError || !campaign) {
+    return res.status(404).json({ error: 'Campaign not found' });
+  }
+
+  const newEnabled = !campaign.enabled;
+
+  // When enabling, set next_run_at to now so scheduler picks it up
+  const updates: Record<string, any> = { enabled: newEnabled };
+  if (newEnabled) {
+    updates.next_run_at = new Date().toISOString();
+  }
+
+  const { data: updated, error } = await supabase
+    .from('b2b_campaigns')
+    .update(updates)
+    .eq('id', id)
+    .eq('business_id', businessId)
+    .select()
+    .single();
+
+  if (error) {
+    log.error('Failed to toggle campaign', error);
+    throw error;
+  }
+
+  log.info('Campaign toggled', { id, enabled: newEnabled });
+  res.json({ campaign: updated });
+}));
+
+// List campaign calls with outcomes
+app.get('/api/campaigns/:id/calls', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  const businessId = req.user?.business_id;
+  const { limit = '50', status: statusFilter } = req.query;
+
+  // Verify campaign ownership
+  const { data: campaign } = await supabase
+    .from('b2b_campaigns')
+    .select('id')
+    .eq('id', id)
+    .eq('business_id', businessId)
+    .single();
+
+  if (!campaign) {
+    return res.status(404).json({ error: 'Campaign not found' });
+  }
+
+  const parsedLimit = Math.min(Math.max(1, parseInt(limit as string) || 50), 100);
+
+  let query = supabase
+    .from('b2b_campaign_calls')
+    .select(`
+      *,
+      customer:b2b_customers(name, phone, email),
+      call_logs:b2b_call_logs(id, call_outcome, duration_sec, summary, created_at)
+    `)
+    .eq('campaign_id', id)
+    .order('created_at', { ascending: false })
+    .limit(parsedLimit);
+
+  if (statusFilter && typeof statusFilter === 'string') {
+    query = query.eq('status', statusFilter.toUpperCase());
+  }
+
+  const { data: calls, error } = await query;
+
+  if (error) {
+    log.error('Failed to fetch campaign calls', error);
+    throw error;
+  }
+
+  res.json({ calls: calls || [], count: calls?.length || 0 });
+}));
+
+// Campaign performance stats
+app.get('/api/campaigns/:id/stats', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  const businessId = req.user?.business_id;
+
+  // Verify ownership
+  const { data: campaign } = await supabase
+    .from('b2b_campaigns')
+    .select('id, campaign_type')
+    .eq('id', id)
+    .eq('business_id', businessId)
+    .single();
+
+  if (!campaign) {
+    return res.status(404).json({ error: 'Campaign not found' });
+  }
+
+  // Fetch all campaign calls for aggregation
+  const { data: calls, error } = await supabase
+    .from('b2b_campaign_calls')
+    .select('status, result_data')
+    .eq('campaign_id', id);
+
+  if (error) {
+    log.error('Failed to fetch campaign stats', error);
+    throw error;
+  }
+
+  const allCalls = calls || [];
+  const completed = allCalls.filter(c => c.status === 'COMPLETED');
+  const booked = completed.filter(c => (c.result_data as any)?.booked_appointment === true);
+  const declined = completed.filter(c => (c.result_data as any)?.outcome === 'DECLINED');
+
+  const statusBreakdown: Record<string, number> = {};
+  for (const call of allCalls) {
+    statusBreakdown[call.status] = (statusBreakdown[call.status] || 0) + 1;
+  }
+
+  res.json({
+    stats: {
+      total_calls: allCalls.length,
+      completed: completed.length,
+      booked: booked.length,
+      declined: declined.length,
+      conversion_rate: completed.length > 0
+        ? Math.round((booked.length / completed.length) * 100)
+        : 0,
+      status_breakdown: statusBreakdown,
+    },
+  });
+}));
+
+// Get campaign template by type + business category
+app.get('/api/campaign-templates/:type/:category', authenticateUser, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const campaignType = req.params.type as string;
+  const businessCategory = req.params.category as string;
+
+  const { data: template, error } = await supabase
+    .from('b2b_campaign_templates')
+    .select('*')
+    .eq('campaign_type', campaignType.toUpperCase())
+    .eq('business_category', businessCategory.toUpperCase())
+    .single();
+
+  if (error || !template) {
+    // Fall back to OTHER category
+    const { data: fallback } = await supabase
+      .from('b2b_campaign_templates')
+      .select('*')
+      .eq('campaign_type', campaignType.toUpperCase())
+      .eq('business_category', 'OTHER')
+      .single();
+
+    if (fallback) {
+      return res.json({ template: fallback });
+    }
+    return res.status(404).json({ error: 'Campaign template not found' });
+  }
+
+  res.json({ template });
+}));
+
+// ============================================
+// CAMPAIGN AGENT CALLBACK ENDPOINTS
+// ============================================
+
+// Agent reports campaign call outcome
+app.post('/api/campaign-calls/:id/result', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { outcome, result_data, summary } = req.body;
+
+  log.info('Campaign call result reported', { id, outcome, result_data });
+
+  const updates: Record<string, any> = {
+    status: 'COMPLETED',
+    completed_at: new Date().toISOString(),
+    result_data: result_data || {},
+  };
+
+  const { data: campaignCall, error } = await supabase
+    .from('b2b_campaign_calls')
+    .update(updates)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    log.error('Failed to update campaign call result', error);
+    throw error;
+  }
+
+  // Also update linked call log outcome if there is one
+  if (campaignCall) {
+    const validOutcomes = ['ANSWERED', 'NO_ANSWER', 'VOICEMAIL', 'BUSY', 'FAILED', 'BOOKED', 'DECLINED', 'REVIEW_SENT'];
+    const callOutcome = outcome && validOutcomes.includes(outcome.toUpperCase())
+      ? outcome.toUpperCase()
+      : 'ANSWERED';
+
+    await supabase
+      .from('b2b_call_logs')
+      .update({
+        call_outcome: callOutcome,
+        summary: summary || null,
+      })
+      .eq('campaign_call_id', id);
+  }
+
+  res.json({ success: true, campaign_call: campaignCall });
+}));
+
+// Agent books appointment during campaign call
+app.post('/api/appointments/create-from-campaign', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
+  const { campaign_call_id, customer_id, business_id, title, scheduled_at, duration_min } = req.body;
+
+  if (!customer_id || !business_id || !title || !scheduled_at) {
+    return res.status(400).json({ error: 'customer_id, business_id, title, and scheduled_at are required' });
+  }
+
+  log.info('Creating appointment from campaign call', { campaign_call_id, customer_id, title, scheduled_at });
+
+  // Create the appointment
+  const { data: appointment, error } = await supabase
+    .from('b2b_appointments')
+    .insert({
+      title,
+      scheduled_at,
+      duration_min: duration_min || 30,
+      status: 'SCHEDULED',
+      business_id,
+      customer_id,
+      reminder_enabled: true,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    log.error('Failed to create appointment from campaign', error);
+    throw error;
+  }
+
+  // Update campaign call result_data to include booked appointment
+  if (campaign_call_id) {
+    await supabase
+      .from('b2b_campaign_calls')
+      .update({
+        result_data: { booked_appointment: true, appointment_id: appointment.id },
+      })
+      .eq('id', campaign_call_id);
+  }
+
+  res.status(201).json({ success: true, appointment });
+}));
+
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found', path: req.path });
@@ -1649,7 +2106,7 @@ async function checkAndTriggerReminders() {
     // Filter to those that need reminders now
     const pendingReminders = appointments?.filter(apt => {
       const scheduledAt = new Date(apt.scheduled_at);
-      const reminderMinutes = apt.reminder_minutes_before ?? 30;
+      const reminderMinutes = (apt.reminder_hours ?? 24) * 60;
       const reminderTime = new Date(scheduledAt.getTime() - reminderMinutes * 60 * 1000);
       return reminderTime <= now;
     }) || [];
@@ -1815,15 +2272,425 @@ async function checkAndTriggerReminders() {
   }
 }
 
-// Start the scheduler
+// Start the reminder scheduler
 function startReminderScheduler() {
   log.info('Starting reminder scheduler (interval: 60s)');
-  
+
   // Run immediately on startup
   setTimeout(() => checkAndTriggerReminders(), 5000);
-  
+
   // Then run every minute
   setInterval(checkAndTriggerReminders, SCHEDULER_INTERVAL_MS);
+}
+
+// ============================================
+// CAMPAIGN SCHEDULER (runs every 5 minutes)
+// ============================================
+
+const CAMPAIGN_SCHEDULER_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+let campaignSchedulerRunning = false;
+
+// Parse HH:MM time string to minutes since midnight
+function parseTimeToMinutes(timeStr: string): number {
+  const [hours, minutes] = timeStr.split(':').map(Number);
+  return (hours || 0) * 60 + (minutes || 0);
+}
+
+// Get current day abbreviation in business timezone
+function getDayAbbrev(date: Date, timezone: string): string {
+  const dayName = date.toLocaleDateString('en-US', { weekday: 'short', timeZone: timezone }).toUpperCase();
+  return dayName.slice(0, 3); // MON, TUE, etc.
+}
+
+// Get current time as minutes since midnight in business timezone
+function getCurrentMinutesInTimezone(timezone: string): number {
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('en-US', {
+    timeZone: timezone,
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  return parseTimeToMinutes(timeStr);
+}
+
+// Check if now is within the campaign's call window
+function isWithinCallWindow(campaign: any, timezone: string): boolean {
+  const now = new Date();
+  const currentDay = getDayAbbrev(now, timezone);
+  const allowedDays = (campaign.allowed_days || 'MON,TUE,WED,THU,FRI').split(',').map((d: string) => d.trim());
+
+  if (!allowedDays.includes(currentDay)) {
+    return false;
+  }
+
+  const currentMinutes = getCurrentMinutesInTimezone(timezone);
+  const windowStart = parseTimeToMinutes(campaign.call_window_start || '09:00');
+  const windowEnd = parseTimeToMinutes(campaign.call_window_end || '17:00');
+
+  return currentMinutes >= windowStart && currentMinutes <= windowEnd;
+}
+
+async function runCampaignScheduler() {
+  if (campaignSchedulerRunning) {
+    log.debug('Campaign scheduler already running, skipping...');
+    return;
+  }
+
+  campaignSchedulerRunning = true;
+  log.info('Campaign scheduler: Running...');
+
+  try {
+    const now = new Date();
+
+    // Fetch all enabled campaigns with their business timezone
+    const { data: campaigns, error } = await supabase
+      .from('b2b_campaigns')
+      .select('*, business:b2b_businesses(timezone, category, voice_preference, name)')
+      .eq('enabled', true);
+
+    if (error) {
+      log.error('Campaign scheduler: Failed to fetch campaigns', error);
+      return;
+    }
+
+    if (!campaigns || campaigns.length === 0) {
+      log.debug('Campaign scheduler: No enabled campaigns');
+      return;
+    }
+
+    for (const campaign of campaigns) {
+      try {
+        const timezone = campaign.business?.timezone || 'America/Los_Angeles';
+
+        // Check if within call window
+        if (!isWithinCallWindow(campaign, timezone)) {
+          log.debug(`Campaign ${campaign.id}: Outside call window`);
+          continue;
+        }
+
+        // === DISPATCH PHASE ===
+        // Find QUEUED campaign_calls where scheduled_for <= NOW
+        const { data: queuedCalls, error: queueError } = await supabase
+          .from('b2b_campaign_calls')
+          .select('*, customer:b2b_customers(*)')
+          .eq('campaign_id', campaign.id)
+          .eq('status', 'QUEUED')
+          .lte('scheduled_for', now.toISOString())
+          .order('scheduled_for', { ascending: true });
+
+        if (queueError) {
+          log.error(`Campaign ${campaign.id}: Error fetching queued calls`, queueError);
+          continue;
+        }
+
+        if (queuedCalls && queuedCalls.length > 0) {
+          // Count current IN_PROGRESS calls to respect max_concurrent_calls
+          const { count: inProgressCount } = await supabase
+            .from('b2b_campaign_calls')
+            .select('*', { count: 'exact', head: true })
+            .eq('campaign_id', campaign.id)
+            .eq('status', 'IN_PROGRESS');
+
+          let currentInProgress = inProgressCount || 0;
+
+          // Check last dispatch time for min_minutes_between_calls
+          const { data: lastDispatched } = await supabase
+            .from('b2b_campaign_calls')
+            .select('started_at')
+            .eq('campaign_id', campaign.id)
+            .in('status', ['IN_PROGRESS', 'COMPLETED'])
+            .order('started_at', { ascending: false })
+            .limit(1)
+            .single();
+
+          const minMsBetween = (campaign.min_minutes_between_calls || 5) * 60 * 1000;
+          if (lastDispatched?.started_at) {
+            const timeSinceLast = now.getTime() - new Date(lastDispatched.started_at).getTime();
+            if (timeSinceLast < minMsBetween) {
+              log.debug(`Campaign ${campaign.id}: Too soon since last dispatch (${Math.round(timeSinceLast / 1000)}s)`);
+              continue;
+            }
+          }
+
+          for (const campaignCall of queuedCalls) {
+            if (currentInProgress >= (campaign.max_concurrent_calls || 2)) {
+              log.debug(`Campaign ${campaign.id}: Max concurrent calls reached`);
+              break;
+            }
+
+            const customer = campaignCall.customer;
+            if (!customer?.phone || !customer.phone.match(/^\+?[1-9]\d{1,14}$/)) {
+              // Skip invalid phone
+              await supabase
+                .from('b2b_campaign_calls')
+                .update({ status: 'SKIPPED', skip_reason: 'Invalid phone number' })
+                .eq('id', campaignCall.id)
+                .eq('status', 'QUEUED');
+              continue;
+            }
+
+            // Atomically claim the call
+            const { data: claimed, error: claimError } = await supabase
+              .from('b2b_campaign_calls')
+              .update({ status: 'IN_PROGRESS', started_at: now.toISOString() })
+              .eq('id', campaignCall.id)
+              .eq('status', 'QUEUED')
+              .select()
+              .single();
+
+            if (claimError || !claimed) {
+              continue; // Already claimed
+            }
+
+            // Fetch campaign template
+            const businessCategory = campaign.business?.category || 'OTHER';
+            const { data: template } = await supabase
+              .from('b2b_campaign_templates')
+              .select('*')
+              .eq('campaign_type', campaign.campaign_type)
+              .eq('business_category', businessCategory)
+              .single();
+
+            // Dispatch the call via LiveKit
+            if (livekitEnabled && sipClient && agentDispatch) {
+              try {
+                const roomName = `campaign-${campaign.campaign_type.toLowerCase()}-${campaignCall.id}-${Date.now()}`;
+
+                const callTypeMap: Record<string, string> = {
+                  RE_ENGAGEMENT: 're_engagement',
+                  REVIEW_COLLECTION: 'review_collection',
+                  NO_SHOW_FOLLOWUP: 'no_show_followup',
+                };
+
+                const metadata = JSON.stringify({
+                  call_type: callTypeMap[campaign.campaign_type] || 're_engagement',
+                  voice_preference: campaign.business?.voice_preference || 'Aoede',
+                  campaign_call_id: campaignCall.id,
+                  campaign_id: campaign.id,
+                  customer: {
+                    id: customer.id,
+                    name: customer.name,
+                    phone: customer.phone,
+                  },
+                  business: {
+                    id: campaign.business_id,
+                    name: campaign.business?.name,
+                    category: businessCategory,
+                    timezone,
+                  },
+                  template: template ? {
+                    system_prompt: template.system_prompt,
+                    greeting: template.greeting,
+                    goal_prompt: template.goal_prompt,
+                    closing: template.closing,
+                    voicemail: template.voicemail,
+                  } : null,
+                  settings: campaign.settings,
+                });
+
+                await agentDispatch.createDispatch(roomName, config.livekitAgentName, {
+                  metadata,
+                });
+
+                const sipCall = await sipClient.createSipParticipant(
+                  config.livekitSipTrunkId,
+                  customer.phone,
+                  roomName,
+                  {
+                    participantIdentity: `customer-${customer.id}`,
+                    participantName: customer.name || 'Customer',
+                    playDialtone: false,
+                  }
+                );
+
+                // Create call log linked to campaign call
+                const callTypeDbMap: Record<string, string> = {
+                  RE_ENGAGEMENT: 'RE_ENGAGEMENT',
+                  REVIEW_COLLECTION: 'REVIEW_COLLECTION',
+                  NO_SHOW_FOLLOWUP: 'NO_SHOW_FOLLOWUP',
+                };
+
+                await supabase.from('b2b_call_logs').insert({
+                  business_id: campaign.business_id,
+                  customer_id: customer.id,
+                  call_type: callTypeDbMap[campaign.campaign_type] || 'RE_ENGAGEMENT',
+                  campaign_call_id: campaignCall.id,
+                  room_name: roomName,
+                  sip_call_id: sipCall.sipCallId,
+                });
+
+                currentInProgress++;
+                log.info(`Campaign scheduler: Dispatched call for ${customer.name}`, {
+                  campaign: campaign.id,
+                  campaignCall: campaignCall.id,
+                  roomName,
+                });
+              } catch (callError) {
+                log.error(`Campaign scheduler: Call dispatch failed for ${campaignCall.id}`, callError);
+                // Revert to QUEUED for retry
+                await supabase
+                  .from('b2b_campaign_calls')
+                  .update({ status: 'QUEUED', started_at: null })
+                  .eq('id', campaignCall.id);
+              }
+            } else {
+              // No LiveKit - mark as failed
+              await supabase
+                .from('b2b_campaign_calls')
+                .update({ status: 'FAILED', skip_reason: 'LiveKit not configured' })
+                .eq('id', campaignCall.id);
+            }
+          }
+        }
+
+        // === EVALUATION PHASE ===
+        // If next_run_at <= NOW, generate new candidate calls
+        if (campaign.next_run_at && new Date(campaign.next_run_at) <= now) {
+          log.info(`Campaign ${campaign.id}: Running evaluation phase`);
+
+          if (campaign.campaign_type === 'RE_ENGAGEMENT') {
+            const settings = (campaign.settings || {}) as Record<string, any>;
+            const daysSinceLastAppointment = settings.days_since_last_appointment || 30;
+            const cutoffDate = new Date(now.getTime() - daysSinceLastAppointment * 24 * 60 * 60 * 1000);
+
+            // Find eligible customers:
+            // 1. Belong to this business
+            // 2. Have a valid phone number
+            // 3. Last appointment was before cutoff (or no appointments)
+            // 4. No future appointment scheduled
+            // 5. Not already called in this campaign cycle
+            const { data: customers, error: custError } = await supabase
+              .from('b2b_customers')
+              .select('id, name, phone')
+              .eq('business_id', campaign.business_id)
+              .neq('phone', '');
+
+            if (custError || !customers) {
+              log.error(`Campaign ${campaign.id}: Error fetching customers`, custError);
+              continue;
+            }
+
+            const eligibleCustomers: typeof customers = [];
+
+            for (const customer of customers) {
+              if (!customer.phone?.match(/^\+?[1-9]\d{1,14}$/)) continue;
+
+              // Check last appointment
+              const { data: lastApt } = await supabase
+                .from('b2b_appointments')
+                .select('scheduled_at')
+                .eq('customer_id', customer.id)
+                .eq('business_id', campaign.business_id)
+                .order('scheduled_at', { ascending: false })
+                .limit(1)
+                .single();
+
+              // Skip if customer has a recent or future appointment
+              if (lastApt) {
+                const lastAptDate = new Date(lastApt.scheduled_at);
+                if (lastAptDate > cutoffDate) continue; // Too recent
+              }
+
+              // Check for future appointments
+              const { count: futureCount } = await supabase
+                .from('b2b_appointments')
+                .select('*', { count: 'exact', head: true })
+                .eq('customer_id', customer.id)
+                .eq('business_id', campaign.business_id)
+                .gte('scheduled_at', now.toISOString())
+                .in('status', ['SCHEDULED', 'CONFIRMED']);
+
+              if (futureCount && futureCount > 0) continue; // Already has future appointment
+
+              // Check if already called in this cycle
+              const cycleStart = new Date(now.getTime() - (campaign.cycle_frequency_days || 30) * 24 * 60 * 60 * 1000);
+              const { count: recentCallCount } = await supabase
+                .from('b2b_campaign_calls')
+                .select('*', { count: 'exact', head: true })
+                .eq('campaign_id', campaign.id)
+                .eq('customer_id', customer.id)
+                .gte('created_at', cycleStart.toISOString());
+
+              if (recentCallCount && recentCallCount > 0) continue; // Already called
+
+              eligibleCustomers.push(customer);
+            }
+
+            log.info(`Campaign ${campaign.id}: Found ${eligibleCustomers.length} eligible customers`);
+
+            if (eligibleCustomers.length > 0) {
+              // Stagger scheduled_for times across the call window
+              const windowStartMin = parseTimeToMinutes(campaign.call_window_start || '09:00');
+              const windowEndMin = parseTimeToMinutes(campaign.call_window_end || '17:00');
+              const windowDurationMin = windowEndMin - windowStartMin;
+              const intervalMin = Math.max(
+                campaign.min_minutes_between_calls || 5,
+                Math.floor(windowDurationMin / Math.max(eligibleCustomers.length, 1))
+              );
+
+              // Schedule calls starting from next call window
+              const tomorrow = new Date(now);
+              tomorrow.setDate(tomorrow.getDate() + 1);
+
+              for (let i = 0; i < eligibleCustomers.length; i++) {
+                const customer = eligibleCustomers[i];
+                const offsetMinutes = windowStartMin + (i * intervalMin);
+
+                // If offset exceeds window, schedule for next day
+                const dayOffset = Math.floor((offsetMinutes - windowStartMin) / windowDurationMin);
+                const minuteInWindow = windowStartMin + ((offsetMinutes - windowStartMin) % windowDurationMin);
+
+                const scheduledDate = new Date(tomorrow);
+                scheduledDate.setDate(scheduledDate.getDate() + dayOffset);
+                // Set time in UTC (approximate - the call window check will gate actual dispatch)
+                scheduledDate.setHours(0, 0, 0, 0);
+                scheduledDate.setMinutes(minuteInWindow);
+
+                await supabase.from('b2b_campaign_calls').insert({
+                  campaign_id: campaign.id,
+                  customer_id: customer.id,
+                  business_id: campaign.business_id,
+                  status: 'QUEUED',
+                  scheduled_for: scheduledDate.toISOString(),
+                });
+              }
+
+              log.info(`Campaign ${campaign.id}: Created ${eligibleCustomers.length} campaign calls`);
+            }
+          }
+
+          // Update campaign run times
+          const nextRunDate = new Date(now.getTime() + (campaign.cycle_frequency_days || 30) * 24 * 60 * 60 * 1000);
+          await supabase
+            .from('b2b_campaigns')
+            .update({
+              last_run_at: now.toISOString(),
+              next_run_at: nextRunDate.toISOString(),
+            })
+            .eq('id', campaign.id);
+        }
+
+      } catch (campaignError) {
+        log.error(`Campaign scheduler: Error processing campaign ${campaign.id}`, campaignError);
+      }
+    }
+
+  } catch (err) {
+    log.error('Campaign scheduler: Unexpected error', err);
+  } finally {
+    campaignSchedulerRunning = false;
+  }
+}
+
+function startCampaignScheduler() {
+  log.info('Starting campaign scheduler (interval: 5m)');
+
+  // Run 10 seconds after startup
+  setTimeout(() => runCampaignScheduler(), 10000);
+
+  // Then run every 5 minutes
+  setInterval(runCampaignScheduler, CAMPAIGN_SCHEDULER_INTERVAL_MS);
 }
 
 // ============================================
@@ -1848,10 +2715,21 @@ server.listen(config.port, () => {
   console.log('  GET  /api/call-logs?business_id=xxx');
   console.log('  POST /api/test-call          (basic TTS)');
   console.log('  POST /api/ai-call            (Gemini Live AI)');
+  console.log('  --- Campaigns ---');
+  console.log('  GET  /api/campaigns');
+  console.log('  POST /api/campaigns');
+  console.log('  GET  /api/campaigns/:id');
+  console.log('  PATCH /api/campaigns/:id');
+  console.log('  DELETE /api/campaigns/:id');
+  console.log('  POST /api/campaigns/:id/toggle');
+  console.log('  GET  /api/campaigns/:id/calls');
+  console.log('  GET  /api/campaigns/:id/stats');
+  console.log('  GET  /api/campaign-templates/:type/:category');
   console.log('');
-  
-  // Start the reminder scheduler
+
+  // Start schedulers
   startReminderScheduler();
+  startCampaignScheduler();
 });
 
 export default app;
