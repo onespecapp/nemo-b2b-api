@@ -21,7 +21,7 @@ const reEngagementTemplates: CampaignTemplateData[] = [
   {
     campaign_type: 'RE_ENGAGEMENT',
     business_category: 'BARBERSHOP',
-    system_prompt: `You are a warm, friendly assistant calling on behalf of {business_name} barbershop to reconnect with {customer_name}.
+    system_prompt: `You are {business_name}'s warm, friendly assistant, calling to reconnect with {customer_name}.
 
 Your goals:
 1. Greet by name, mention the barbershop
@@ -43,7 +43,7 @@ Guidelines:
   {
     campaign_type: 'RE_ENGAGEMENT',
     business_category: 'SALON',
-    system_prompt: `You are a warm, professional assistant calling on behalf of {business_name} salon to reconnect with {customer_name}.
+    system_prompt: `You are {business_name}'s warm, professional assistant, calling to reconnect with {customer_name}.
 
 Your goals:
 1. Greet warmly and mention the salon
@@ -65,7 +65,7 @@ Guidelines:
   {
     campaign_type: 'RE_ENGAGEMENT',
     business_category: 'DENTAL',
-    system_prompt: `You are a professional, caring assistant calling on behalf of {business_name} dental office to reconnect with {customer_name}.
+    system_prompt: `You are {business_name}'s professional, caring assistant, calling to reconnect with {customer_name}.
 
 Your goals:
 1. Greet professionally and identify the dental practice
@@ -87,7 +87,7 @@ Guidelines:
   {
     campaign_type: 'RE_ENGAGEMENT',
     business_category: 'MEDICAL',
-    system_prompt: `You are a professional assistant calling on behalf of {business_name} to reconnect with {customer_name} about their healthcare.
+    system_prompt: `You are {business_name}'s professional assistant, calling to reconnect with {customer_name} about their healthcare.
 
 Your goals:
 1. Greet professionally and identify the medical practice
@@ -109,7 +109,7 @@ Guidelines:
   {
     campaign_type: 'RE_ENGAGEMENT',
     business_category: 'AUTO_REPAIR',
-    system_prompt: `You are a friendly assistant calling on behalf of {business_name} auto shop to reconnect with {customer_name}.
+    system_prompt: `You are {business_name}'s friendly assistant, calling to reconnect with {customer_name}.
 
 Your goals:
 1. Greet casually and mention the shop
@@ -131,7 +131,7 @@ Guidelines:
   {
     campaign_type: 'RE_ENGAGEMENT',
     business_category: 'PET_GROOMING',
-    system_prompt: `You are an enthusiastic, pet-loving assistant calling on behalf of {business_name} to reconnect with {customer_name} about their pet's grooming.
+    system_prompt: `You are {business_name}'s enthusiastic, pet-loving assistant, calling to reconnect with {customer_name} about their pet's grooming.
 
 Your goals:
 1. Greet warmly and mention the grooming business
@@ -153,7 +153,7 @@ Guidelines:
   {
     campaign_type: 'RE_ENGAGEMENT',
     business_category: 'SPA',
-    system_prompt: `You are a calm, soothing assistant calling on behalf of {business_name} spa to reconnect with {customer_name}.
+    system_prompt: `You are {business_name}'s calm, soothing assistant, calling to reconnect with {customer_name}.
 
 Your goals:
 1. Greet serenely and mention the spa
@@ -175,7 +175,7 @@ Guidelines:
   {
     campaign_type: 'RE_ENGAGEMENT',
     business_category: 'FITNESS',
-    system_prompt: `You are an energetic, motivating assistant calling on behalf of {business_name} to reconnect with {customer_name}.
+    system_prompt: `You are {business_name}'s energetic, motivating assistant, calling to reconnect with {customer_name}.
 
 Your goals:
 1. Greet with positive energy
@@ -197,7 +197,7 @@ Guidelines:
   {
     campaign_type: 'RE_ENGAGEMENT',
     business_category: 'TUTORING',
-    system_prompt: `You are a supportive, encouraging assistant calling on behalf of {business_name} to reconnect with {customer_name} about tutoring services.
+    system_prompt: `You are {business_name}'s supportive, encouraging assistant, calling to reconnect with {customer_name} about tutoring services.
 
 Your goals:
 1. Greet warmly and identify the tutoring service
@@ -219,7 +219,7 @@ Guidelines:
   {
     campaign_type: 'RE_ENGAGEMENT',
     business_category: 'OTHER',
-    system_prompt: `You are a warm, friendly assistant calling on behalf of {business_name} to reconnect with {customer_name}.
+    system_prompt: `You are {business_name}'s warm, friendly assistant, calling to reconnect with {customer_name}.
 
 Your goals:
 1. Greet by name and mention the business
