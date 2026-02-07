@@ -1096,6 +1096,20 @@ app.get('/api/calls/by-room/:roomName', authenticateInternal, asyncHandler(async
   res.json({ call });
 }));
 
+// Agent error reporting - allows the agent to report crashes/errors for visibility
+app.post('/api/calls/by-room/:roomName/error', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
+  const { roomName } = req.params;
+  const { error, timestamp } = req.body;
+  log.error('AGENT ERROR REPORT', { roomName, error, timestamp });
+
+  // Update call log if it exists
+  await supabase.from('b2b_call_logs')
+    .update({ notes: `Agent error: ${(error || '').slice(0, 500)}`, call_outcome: 'ERROR' })
+    .eq('room_name', roomName);
+
+  res.json({ ok: true });
+}));
+
 // ==========================================
 // AGENT CALLBACK ENDPOINTS
 // Called by the LiveKit agent during/after calls
