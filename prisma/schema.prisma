@@ -112,7 +112,7 @@ model Appointment {
 
   // Reminder settings
   reminder_enabled Boolean @default(true)
-  reminder_hours   Int     @default(24) // Hours before to call
+  reminder_minutes_before Int @default(30) // Minutes before to call
 
   // Status
   status AppointmentStatus @default(SCHEDULED)

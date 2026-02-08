@@ -2,7 +2,7 @@
  * Determines whether a reminder call should be triggered for a given appointment.
  *
  * The core logic:
- * 1. Calculate `reminderTime` = scheduled_at - reminder_hours (default 24h).
+ * 1. Calculate `reminderTime` = scheduled_at - reminder_minutes_before (default 30 min).
  * 2. If the appointment was created AFTER its reminder window opened
  *    (i.e. created_at > reminderTime), skip it. This prevents immediate
  *    calls when an appointment is booked closer to its scheduled time
@@ -14,7 +14,7 @@ export interface AppointmentForReminder {
   id: string;
   scheduled_at: string;   // ISO 8601
   created_at: string;     // ISO 8601
-  reminder_hours?: number | null;
+  reminder_minutes_before?: number | null;
 }
 
 export function shouldTriggerReminder(
@@ -22,7 +22,7 @@ export function shouldTriggerReminder(
   now: Date,
 ): boolean {
   const scheduledAt = new Date(appointment.scheduled_at);
-  const reminderMinutes = (appointment.reminder_hours ?? 24) * 60;
+  const reminderMinutes = appointment.reminder_minutes_before ?? 30;
   const reminderTime = new Date(scheduledAt.getTime() - reminderMinutes * 60 * 1000);
 
   // Skip if the appointment was created after its reminder window opened.

@@ -668,8 +668,8 @@ app.get('/api/appointments/pending-reminders', authenticateInternal, asyncHandle
   // Filter to only those that need reminders now
   const pendingReminders = appointments?.filter(apt => {
     const scheduledAt = new Date(apt.scheduled_at);
-    // Use reminder_hours (default 24 hours if not set), convert to minutes
-    const reminderMinutes = (apt.reminder_hours ?? 24) * 60;
+    // Use reminder_minutes_before (default 30 minutes if not set)
+    const reminderMinutes = apt.reminder_minutes_before ?? 30;
     const reminderTime = new Date(scheduledAt.getTime() - reminderMinutes * 60 * 1000);
     return reminderTime <= now;
   }) || [];

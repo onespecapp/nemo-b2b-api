@@ -120,7 +120,7 @@ function generateAppointments() {
         scheduled_at: new Date(date).toISOString(),
         duration_min: service.duration,
         reminder_enabled: true,
-        reminder_hours: 24,
+        reminder_minutes_before: 1440,
         status: status,
         business_id: demoBusiness.id,
         customer_id: customer.id,
