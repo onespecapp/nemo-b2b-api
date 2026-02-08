@@ -9,6 +9,7 @@ import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { SipClient, RoomServiceClient, AgentDispatchClient } from 'livekit-server-sdk';
 import rateLimit from 'express-rate-limit';
 import crypto from 'crypto';
+import { shouldTriggerReminder } from './utils/reminder-filter';
 
 dotenv.config();
 
@@ -2119,10 +2120,11 @@ async function checkAndTriggerReminders() {
 
     // Filter to those that need reminders now
     const pendingReminders = appointments?.filter(apt => {
-      const scheduledAt = new Date(apt.scheduled_at);
-      const reminderMinutes = (apt.reminder_hours ?? 24) * 60;
-      const reminderTime = new Date(scheduledAt.getTime() - reminderMinutes * 60 * 1000);
-      return reminderTime <= now;
+      const result = shouldTriggerReminder(apt, now);
+      if (!result) {
+        log.debug(`Scheduler: Skipping appointment ${apt.id} — not ready or created after reminder window`);
+      }
+      return result;
     }) || [];
 
     if (pendingReminders.length === 0) {
