@@ -26,6 +26,9 @@ model Business {
   // Business category (determines call templates)
   category BusinessCategory @default(OTHER)
 
+  // Timezone
+  timezone String @default("America/Los_Angeles")
+
   // AI Voice settings
   voice_preference String @default("Aoede") // Puck, Charon, Kore, Fenrir, Aoede
 

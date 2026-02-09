@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS b2b_businesses (
   email TEXT,
   owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   voice_preference TEXT DEFAULT 'Aoede',
+  category TEXT DEFAULT 'OTHER',
   timezone TEXT DEFAULT 'America/Los_Angeles',
   subscription_tier TEXT DEFAULT 'FREE' CHECK (subscription_tier IN ('FREE', 'STARTER', 'PROFESSIONAL', 'ENTERPRISE')),
   subscription_status TEXT DEFAULT 'ACTIVE' CHECK (subscription_status IN ('ACTIVE', 'PAST_DUE', 'CANCELED', 'TRIALING')),
@@ -41,8 +42,8 @@ CREATE TABLE IF NOT EXISTS b2b_appointments (
   scheduled_at TIMESTAMPTZ NOT NULL,
   duration_min INTEGER DEFAULT 30,
   reminder_enabled BOOLEAN DEFAULT true,
-  reminder_hours INTEGER DEFAULT 24,
-  status TEXT DEFAULT 'SCHEDULED' CHECK (status IN ('SCHEDULED', 'CONFIRMED', 'RESCHEDULED', 'CANCELED', 'COMPLETED', 'NO_SHOW')),
+  reminder_minutes_before INTEGER DEFAULT 30,
+  status TEXT DEFAULT 'SCHEDULED' CHECK (status IN ('SCHEDULED', 'REMINDED', 'CONFIRMED', 'RESCHEDULED', 'CANCELED', 'COMPLETED', 'NO_SHOW')),
   business_id TEXT NOT NULL REFERENCES b2b_businesses(id) ON DELETE CASCADE,
   customer_id TEXT NOT NULL REFERENCES b2b_customers(id) ON DELETE CASCADE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -249,4 +250,54 @@ BEGIN
   ) THEN
     ALTER TABLE b2b_customers ADD COLUMN timezone TEXT DEFAULT NULL;
   END IF;
+
+  -- Rename reminder_hours → reminder_minutes_before (for existing databases)
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'b2b_appointments' AND column_name = 'reminder_hours'
+  ) THEN
+    ALTER TABLE b2b_appointments RENAME COLUMN reminder_hours TO reminder_minutes_before;
+    ALTER TABLE b2b_appointments ALTER COLUMN reminder_minutes_before SET DEFAULT 30;
+  END IF;
+
+  -- Add duration_min if missing
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'b2b_appointments' AND column_name = 'duration_min'
+  ) THEN
+    ALTER TABLE b2b_appointments ADD COLUMN duration_min INTEGER DEFAULT 30;
+  END IF;
+
+  -- Add category to businesses if missing
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'b2b_businesses' AND column_name = 'category'
+  ) THEN
+    ALTER TABLE b2b_businesses ADD COLUMN category TEXT DEFAULT 'OTHER';
+  END IF;
+END $$;
+
+-- Drop old status CHECK constraint and re-create with REMINDED included
+DO $$
+BEGIN
+  -- Find and drop the existing check constraint on status
+  IF EXISTS (
+    SELECT 1 FROM information_schema.constraint_column_usage
+    WHERE table_name = 'b2b_appointments' AND column_name = 'status'
+  ) THEN
+    -- Drop all check constraints on the status column
+    EXECUTE (
+      SELECT string_agg('ALTER TABLE b2b_appointments DROP CONSTRAINT ' || quote_ident(con.conname), '; ')
+      FROM pg_constraint con
+      JOIN pg_attribute att ON att.attnum = ANY(con.conkey) AND att.attrelid = con.conrelid
+      WHERE con.conrelid = 'b2b_appointments'::regclass
+        AND att.attname = 'status'
+        AND con.contype = 'c'
+    );
+  END IF;
+
+  -- Re-create with REMINDED included
+  ALTER TABLE b2b_appointments
+    ADD CONSTRAINT b2b_appointments_status_check
+    CHECK (status IN ('SCHEDULED', 'REMINDED', 'CONFIRMED', 'RESCHEDULED', 'CANCELED', 'COMPLETED', 'NO_SHOW'));
 END $$;
