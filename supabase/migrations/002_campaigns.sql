@@ -150,43 +150,43 @@ ALTER TABLE b2b_campaign_templates ENABLE ROW LEVEL SECURITY;
 -- Campaigns: business owner CRUD
 CREATE POLICY "Users can view own campaigns" ON b2b_campaigns
   FOR SELECT USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 CREATE POLICY "Users can create campaigns" ON b2b_campaigns
   FOR INSERT WITH CHECK (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 CREATE POLICY "Users can update own campaigns" ON b2b_campaigns
   FOR UPDATE USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 CREATE POLICY "Users can delete own campaigns" ON b2b_campaigns
   FOR DELETE USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- Campaign Calls: business owner CRUD
 CREATE POLICY "Users can view own campaign calls" ON b2b_campaign_calls
   FOR SELECT USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 CREATE POLICY "Users can create campaign calls" ON b2b_campaign_calls
   FOR INSERT WITH CHECK (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 CREATE POLICY "Users can update own campaign calls" ON b2b_campaign_calls
   FOR UPDATE USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 CREATE POLICY "Users can delete own campaign calls" ON b2b_campaign_calls
   FOR DELETE USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- Campaign Templates: public read (global defaults)

@@ -93,19 +93,19 @@ ALTER TABLE b2b_call_logs ENABLE ROW LEVEL SECURITY;
 
 -- Users can view their own businesses
 CREATE POLICY "Users can view own businesses" ON b2b_businesses
-  FOR SELECT USING (owner_id = auth.uid());
+  FOR SELECT USING (owner_id = auth.uid()::text);
 
 -- Users can create businesses (they become the owner)
 CREATE POLICY "Users can create businesses" ON b2b_businesses
-  FOR INSERT WITH CHECK (owner_id = auth.uid());
+  FOR INSERT WITH CHECK (owner_id = auth.uid()::text);
 
 -- Users can update their own businesses
 CREATE POLICY "Users can update own businesses" ON b2b_businesses
-  FOR UPDATE USING (owner_id = auth.uid());
+  FOR UPDATE USING (owner_id = auth.uid()::text);
 
 -- Users can delete their own businesses
 CREATE POLICY "Users can delete own businesses" ON b2b_businesses
-  FOR DELETE USING (owner_id = auth.uid());
+  FOR DELETE USING (owner_id = auth.uid()::text);
 
 -- ============================================
 -- CUSTOMERS POLICIES
@@ -114,25 +114,25 @@ CREATE POLICY "Users can delete own businesses" ON b2b_businesses
 -- Users can view customers of their businesses
 CREATE POLICY "Users can view own customers" ON b2b_customers
   FOR SELECT USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- Users can create customers for their businesses
 CREATE POLICY "Users can create customers" ON b2b_customers
   FOR INSERT WITH CHECK (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- Users can update customers of their businesses
 CREATE POLICY "Users can update own customers" ON b2b_customers
   FOR UPDATE USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- Users can delete customers of their businesses
 CREATE POLICY "Users can delete own customers" ON b2b_customers
   FOR DELETE USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- ============================================
@@ -142,25 +142,25 @@ CREATE POLICY "Users can delete own customers" ON b2b_customers
 -- Users can view appointments of their businesses
 CREATE POLICY "Users can view own appointments" ON b2b_appointments
   FOR SELECT USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- Users can create appointments for their businesses
 CREATE POLICY "Users can create appointments" ON b2b_appointments
   FOR INSERT WITH CHECK (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- Users can update appointments of their businesses
 CREATE POLICY "Users can update own appointments" ON b2b_appointments
   FOR UPDATE USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- Users can delete appointments of their businesses
 CREATE POLICY "Users can delete own appointments" ON b2b_appointments
   FOR DELETE USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- ============================================
@@ -170,13 +170,13 @@ CREATE POLICY "Users can delete own appointments" ON b2b_appointments
 -- Users can view call logs of their businesses
 CREATE POLICY "Users can view own call logs" ON b2b_call_logs
   FOR SELECT USING (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- Users can create call logs for their businesses
 CREATE POLICY "Users can create call logs" ON b2b_call_logs
   FOR INSERT WITH CHECK (
-    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid())
+    business_id IN (SELECT id FROM b2b_businesses WHERE owner_id = auth.uid()::text)
   );
 
 -- ============================================
