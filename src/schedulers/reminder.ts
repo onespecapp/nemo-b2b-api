@@ -43,7 +43,19 @@ export async function checkAndTriggerReminders() {
     const pendingReminders = appointments?.filter(apt => {
       const result = shouldTriggerReminder(apt, now);
       if (!result) {
-        log.debug(`Scheduler: Skipping appointment ${apt.id} — not ready or created after reminder window`);
+        const reminderMinutes = apt.reminder_minutes_before ?? 30;
+        const scheduledAt = new Date(apt.scheduled_at);
+        const reminderTime = new Date(scheduledAt.getTime() - reminderMinutes * 60 * 1000);
+        log.debug(`Scheduler: Skipping appointment ${apt.id}`, {
+          reason: new Date(apt.created_at) > reminderTime
+            ? 'created after reminder window'
+            : 'reminder time not reached yet',
+          created_at: apt.created_at,
+          scheduled_at: apt.scheduled_at,
+          reminder_minutes: reminderMinutes,
+          reminder_time: reminderTime.toISOString(),
+          now: now.toISOString(),
+        });
       }
       return result;
     }) || [];

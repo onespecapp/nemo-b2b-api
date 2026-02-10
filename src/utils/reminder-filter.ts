@@ -25,6 +25,12 @@ export function shouldTriggerReminder(
   const reminderMinutes = appointment.reminder_minutes_before ?? 30;
   const reminderTime = new Date(scheduledAt.getTime() - reminderMinutes * 60 * 1000);
 
+  // When reminder_minutes_before is 0, trigger as soon as scheduled_at is reached
+  // (bypasses the created-after-window check, useful for testing)
+  if (reminderMinutes === 0) {
+    return scheduledAt <= now;
+  }
+
   // Skip if the appointment was created after its reminder window opened.
   const createdAt = new Date(appointment.created_at);
   if (createdAt > reminderTime) {
