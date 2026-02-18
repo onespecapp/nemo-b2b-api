@@ -217,11 +217,18 @@ CREATE TRIGGER update_b2b_appointments_updated_at
 CREATE OR REPLACE FUNCTION handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
-  INSERT INTO b2b_businesses (owner_id, name)
-  VALUES (NEW.id, COALESCE(NEW.raw_user_meta_data->>'business_name', 'My Business'));
+  INSERT INTO b2b_businesses (id, owner_id, name, email, category)
+  VALUES (
+    gen_random_uuid()::text,
+    NEW.id::text,
+    COALESCE(NEW.raw_user_meta_data->>'business_name', 'My Business'),
+    NEW.email,
+    COALESCE(NEW.raw_user_meta_data->>'business_category', 'OTHER')::"BusinessCategory"
+  );
   RETURN NEW;
 END;
-$$ language 'plpgsql' SECURITY DEFINER;
+$$ language 'plpgsql' SECURITY DEFINER
+SET search_path = public;
 
 -- Drop existing trigger if exists
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;

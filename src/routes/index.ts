@@ -8,6 +8,9 @@ import aiCallRouter from './ai-call';
 import appointmentsRouter from './appointments';
 import campaignsRouter from './campaigns';
 import campaignCallbacksRouter from './campaign-callbacks';
+import inboundRouter from './inbound';
+import businessConfigRouter from './business-config';
+import messagesRouter from './messages';
 
 export function registerRoutes(app: Express) {
   app.use(healthRouter);
@@ -19,6 +22,9 @@ export function registerRoutes(app: Express) {
   app.use(appointmentsRouter);
   app.use(campaignsRouter);
   app.use(campaignCallbacksRouter);
+  app.use(inboundRouter);
+  app.use(businessConfigRouter);
+  app.use(messagesRouter);
 
   // 404 handler
   app.use((req, res) => {
