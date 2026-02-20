@@ -102,22 +102,19 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
         return res.json({ received: true });
       }
 
-      // Answer the call
-      try {
-        await telnyx.calls.actions.answer(callControlId, {});
-      } catch (e) {
-        log.error('Failed to answer inbound call', e);
-        return res.json({ received: true });
-      }
-
       // Set up LiveKit room and agent
-      if (!livekitEnabled || !sipClient || !agentDispatch) {
+      if (!livekitEnabled || !agentDispatch || !config.livekitSipUri) {
         log.error('LiveKit not configured for inbound calls');
-        await telnyx.calls.actions.speak(callControlId, {
-          payload: `Thank you for calling ${business.name}. We are unable to take your call right now. Please try again later. Goodbye!`,
-          voice: 'female',
-          language: 'en-US',
-        });
+        try {
+          await telnyx.calls.actions.answer(callControlId, {});
+          await telnyx.calls.actions.speak(callControlId, {
+            payload: `Thank you for calling ${business.name}. We are unable to take your call right now. Please try again later. Goodbye!`,
+            voice: 'female',
+            language: 'en-US',
+          });
+        } catch (e) {
+          log.error('Failed to play fallback message', e);
+        }
         return res.json({ received: true });
       }
 
@@ -139,25 +136,20 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
       };
 
       try {
-        // Dispatch agent to room
+        // Dispatch agent to room first
         log.info('Dispatching agent for inbound call', { roomName, agentName: config.livekitAgentName });
         await agentDispatch.createDispatch(roomName, config.livekitAgentName, {
           metadata: JSON.stringify(metadata),
         });
 
-        // Connect Telnyx call to LiveKit room via SIP
-        const sipCall = await sipClient.createSipParticipant(
-          config.livekitSipTrunkId,
-          `sip:${callControlId}@telnyx.com`,
-          roomName,
-          {
-            participantIdentity: `caller-${fromNumber}-${Date.now()}`,
-            participantName: fromNumber,
-            playDialtone: false,
-          }
-        );
+        // Transfer the inbound call to LiveKit's SIP trunk
+        // This connects the caller directly to the LiveKit room via SIP
+        const sipUri = `sip:${roomName}@${config.livekitSipUri}`;
+        log.info('Transferring inbound call to LiveKit', { roomName, sipUri, callLogId: callLog.id });
 
-        log.info('Inbound call connected to LiveKit', { roomName, sipCallId: sipCall.sipCallId, callLogId: callLog.id });
+        await telnyx.calls.actions.transfer(callControlId, {
+          to: sipUri,
+        });
 
         // Update call log with room name
         await supabase
@@ -166,11 +158,16 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
           .eq('id', callLog.id);
       } catch (error) {
         log.error('Failed to set up LiveKit for inbound call', error);
-        await telnyx.calls.actions.speak(callControlId, {
-          payload: `Thank you for calling ${business.name}. We are experiencing technical difficulties. Please try again later. Goodbye!`,
-          voice: 'female',
-          language: 'en-US',
-        });
+        try {
+          await telnyx.calls.actions.answer(callControlId, {});
+          await telnyx.calls.actions.speak(callControlId, {
+            payload: `Thank you for calling ${business.name}. We are experiencing technical difficulties. Please try again later. Goodbye!`,
+            voice: 'female',
+            language: 'en-US',
+          });
+        } catch (e) {
+          log.error('Failed to play error message', e);
+        }
       }
 
       break;
