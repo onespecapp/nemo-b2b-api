@@ -39,7 +39,7 @@ export const config = {
   livekitApiSecret: process.env.LIVEKIT_API_SECRET || '',
   livekitSipTrunkId: process.env.SIP_TRUNK_ID || '',
   livekitAgentName: process.env.LIVEKIT_AGENT_NAME || 'nemo_b2b_agent',
-  livekitSipUri: process.env.LIVEKIT_SIP_URI || '',
+  livekitSipUri: process.env.LIVEKIT_SIP_URI || process.env.LIVEKIT_SIP_DOMAIN || '',
   // Security config
   allowedOrigins: process.env.ALLOWED_ORIGINS?.split(',') || [],
   internalApiKey: process.env.INTERNAL_API_KEY || '',
