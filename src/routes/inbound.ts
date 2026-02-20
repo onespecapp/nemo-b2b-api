@@ -75,35 +75,12 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
         return res.json({ received: true });
       }
 
-      // Check business hours
+      // Determine if outside business hours (agent will handle both cases)
       const businessHours = business.business_hours as BusinessHours;
-      if (businessHours && !isWithinBusinessHours(businessHours, business.timezone)) {
-        log.info('Outside business hours, playing message', { businessId: business.id });
+      const isAfterHours = businessHours ? !isWithinBusinessHours(businessHours, business.timezone) : false;
 
-        try {
-          await telnyx.calls.actions.answer(callControlId, {});
-        } catch (e) {
-          log.error('Failed to answer for after-hours message', e);
-          return res.json({ received: true });
-        }
-
-        // Create call log for after-hours call
-        await supabase.from('b2b_call_logs').insert({
-          business_id: business.id,
-          call_type: 'INBOUND',
-          sip_call_id: callControlId,
-          to_number: toNumber,
-          from_number: fromNumber,
-          call_outcome: 'AFTER_HOURS',
-        });
-
-        await telnyx.calls.actions.speak(callControlId, {
-          payload: `Thank you for calling ${business.name}. We are currently closed. Please call back during our business hours. Goodbye!`,
-          voice: 'female',
-          language: 'en-US',
-        });
-
-        return res.json({ received: true });
+      if (isAfterHours) {
+        log.info('Outside business hours, routing to AI agent with after-hours flag', { businessId: business.id });
       }
 
       // Create call log
@@ -148,6 +125,7 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
 
       const metadata: InboundCallMetadata = {
         call_type: 'inbound_receptionist',
+        business_id: business.id,
         business_name: business.name,
         receptionist_greeting: business.receptionist_greeting,
         services: business.services || [],
@@ -157,6 +135,7 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
         receptionist_instructions: business.receptionist_instructions,
         call_log_id: callLog.id,
         caller_phone: fromNumber,
+        is_after_hours: isAfterHours,
       };
 
       try {

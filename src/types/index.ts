@@ -62,6 +62,7 @@ export interface Message {
 
 export interface InboundCallMetadata {
   call_type: 'inbound_receptionist';
+  business_id: string;
   business_name: string;
   receptionist_greeting: string | null;
   services: string[];
@@ -71,4 +72,5 @@ export interface InboundCallMetadata {
   receptionist_instructions: string | null;
   call_log_id: string;
   caller_phone: string;
+  is_after_hours: boolean;
 }
