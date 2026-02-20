@@ -1,8 +1,8 @@
-import { Router, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import { log } from '../config';
 import { supabase } from '../clients/supabase';
 import { AuthenticatedRequest } from '../types';
-import { authenticateUser } from '../middleware/auth';
+import { authenticateUser, authenticateInternal } from '../middleware/auth';
 import { asyncHandler } from '../middleware/error-handler';
 
 const router = Router();
@@ -101,6 +101,27 @@ router.post('/api/business/receptionist/toggle', authenticateUser, asyncHandler(
 
   log.info('Receptionist toggled', { businessId, enabled: newEnabled });
   res.json({ receptionist_enabled: updated.receptionist_enabled });
+}));
+
+// Look up business receptionist config by phone number (internal, for voice agent)
+router.get('/api/business/by-phone/:phone', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
+  const phone = req.params.phone;
+
+  const { data: business, error } = await supabase
+    .from('b2b_businesses')
+    .select('id, name, phone, receptionist_enabled, receptionist_greeting, business_hours, services, faqs, transfer_phone, receptionist_instructions, timezone')
+    .eq('phone', phone)
+    .single();
+
+  if (error || !business) {
+    return res.status(404).json({ error: 'Business not found for this phone number' });
+  }
+
+  if (!business.receptionist_enabled) {
+    return res.status(403).json({ error: 'Receptionist not enabled for this business' });
+  }
+
+  res.json({ business });
 }));
 
 export default router;
