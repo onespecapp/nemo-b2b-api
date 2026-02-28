@@ -2,13 +2,9 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
 import { config, log } from './config';
-import { googleAI } from './clients/google-ai';
 import { generalRateLimiter } from './middleware/rate-limit';
 import { globalErrorHandler } from './middleware/error-handler';
 import { registerRoutes } from './routes';
-import { setupTelnyxMediaWebSocket } from './websocket/telnyx-media';
-import { startReminderScheduler } from './schedulers/reminder';
-import { startCampaignScheduler } from './schedulers/campaign';
 
 // ============================================
 // EXPRESS APP
@@ -19,9 +15,6 @@ const server = createServer(app);
 
 // Trust first proxy (fixes ERR_ERL_UNEXPECTED_X_FORWARDED_FOR when behind reverse proxy)
 app.set('trust proxy', 1);
-
-// WebSocket setup
-setupTelnyxMediaWebSocket(server);
 
 // Middleware - Security
 const corsOptions = {
@@ -76,37 +69,23 @@ app.use(globalErrorHandler);
 
 server.listen(config.port, () => {
   console.log('');
-  console.log('🚀 Nemo B2B API Started');
-  console.log('========================');
-  console.log(`📍 Port: ${config.port}`);
-  console.log(`🌍 Environment: ${config.nodeEnv}`);
-  console.log(`📞 Telnyx Phone: ${config.telnyxPhoneNumber}`);
-  console.log(`🔗 Webhook URL: ${config.apiUrl}`);
-  console.log(`🔌 WebSocket URL: ${config.wsUrl}`);
-  console.log(`🤖 Gemini Live: ${googleAI ? 'Enabled' : 'Disabled (missing GOOGLE_AI_API_KEY)'}`);
+  console.log('Nemo B2B AI Receptionist API Started');
+  console.log('====================================');
+  console.log(`Port: ${config.port}`);
+  console.log(`Environment: ${config.nodeEnv}`);
+  console.log(`Webhook URL: ${config.apiUrl}`);
   console.log('');
   console.log('Endpoints:');
   console.log('  GET  /health');
-  console.log('  GET  /api/appointments/pending-reminders');
-  console.log('  POST /api/appointments/:id/trigger-call');
-  console.log('  GET  /api/call-logs?business_id=xxx');
-  console.log('  POST /api/test-call          (basic TTS)');
-  console.log('  POST /api/ai-call            (Gemini Live AI)');
-  console.log('  --- Campaigns ---');
-  console.log('  GET  /api/campaigns');
-  console.log('  POST /api/campaigns');
-  console.log('  GET  /api/campaigns/:id');
-  console.log('  PATCH /api/campaigns/:id');
-  console.log('  DELETE /api/campaigns/:id');
-  console.log('  POST /api/campaigns/:id/toggle');
-  console.log('  GET  /api/campaigns/:id/calls');
-  console.log('  GET  /api/campaigns/:id/stats');
-  console.log('  GET  /api/campaign-templates/:type/:category');
+  console.log('  POST /api/webhooks/telnyx/inbound  (inbound call handler)');
+  console.log('  GET  /api/calls                    (call history)');
+  console.log('  GET  /api/appointments             (appointment CRUD)');
+  console.log('  GET  /api/appointments/availability (slot availability)');
+  console.log('  POST /api/appointments/book-inbound (book from call)');
+  console.log('  POST /api/calls/:id/transfer       (call transfer)');
+  console.log('  GET  /api/messages                 (messages)');
+  console.log('  GET  /api/business/config           (receptionist config)');
   console.log('');
-
-  // Start schedulers
-  startReminderScheduler();
-  startCampaignScheduler();
 });
 
 export default app;

@@ -1,220 +1,157 @@
 import { Router, Request, Response } from 'express';
 import { config, log } from '../config';
 import { supabase } from '../clients/supabase';
-import { telnyx } from '../clients/telnyx';
-import { livekitEnabled, sipClient, agentDispatch } from '../clients/livekit';
 import { AuthenticatedRequest } from '../types';
 import { authenticateUser, authenticateInternal } from '../middleware/auth';
 import { isValidUUID } from '../middleware/validation';
-import { callRateLimiter } from '../middleware/rate-limit';
 import { asyncHandler } from '../middleware/error-handler';
 
 const router = Router();
 
-// Get upcoming appointments that need reminders (internal use by scheduler)
-router.get('/api/appointments/pending-reminders', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
-  const now = new Date();
+// Get appointment availability for a given date
+router.get('/api/appointments/availability', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
+  const { business_id, date, duration_min } = req.query;
 
-  // Fetch appointments that are scheduled and within the next 24 hours
-  // Include appointments up to 1 hour in the past (in case scheduler missed them)
-  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-  const { data: appointments, error } = await supabase
-    .from('b2b_appointments')
-    .select(`
-      *,
-      customer:b2b_customers(*),
-      business:b2b_businesses(*)
-    `)
-    .eq('status', 'SCHEDULED')
-    .lte('scheduled_at', new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString())
-    .gte('scheduled_at', oneHourAgo.toISOString());
-
-  if (error) {
-    log.error('Failed to fetch appointments', error);
-    throw error;
+  if (!business_id || !date) {
+    return res.status(400).json({ error: 'business_id and date are required' });
   }
 
-  // Filter to only those that need reminders now
-  const pendingReminders = appointments?.filter(apt => {
-    const scheduledAt = new Date(apt.scheduled_at);
-    // Use reminder_minutes_before (default 30 minutes if not set)
-    const reminderMinutes = apt.reminder_minutes_before ?? 30;
-    const reminderTime = new Date(scheduledAt.getTime() - reminderMinutes * 60 * 1000);
-    return reminderTime <= now;
-  }) || [];
+  const duration = parseInt(duration_min as string) || 60;
 
-  log.info(`Found ${pendingReminders.length} pending reminders`);
-  res.json({ appointments: pendingReminders, count: pendingReminders.length });
-}));
-
-// Trigger a reminder call for an appointment
-router.post('/api/appointments/:id/trigger-call', authenticateUser, callRateLimiter, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
-
-  // Validate appointment ID format
-  if (!isValidUUID(id)) {
-    return res.status(400).json({ error: 'Invalid appointment ID format' });
-  }
-
-  // Get appointment details with business category
-  const { data: appointment, error: fetchError } = await supabase
-    .from('b2b_appointments')
-    .select(`
-      *,
-      customer:b2b_customers(*),
-      business:b2b_businesses(*)
-    `)
-    .eq('id', id)
+  // Get business hours for that day
+  const { data: business, error: bizError } = await supabase
+    .from('b2b_businesses')
+    .select('business_hours, timezone')
+    .eq('id', business_id)
     .single();
 
-  if (fetchError || !appointment) {
-    log.error('Appointment not found', { id, error: fetchError });
-    return res.status(404).json({ error: 'Appointment not found' });
+  if (bizError || !business) {
+    return res.status(404).json({ error: 'Business not found' });
   }
 
-  const customerPhone = appointment.customer?.phone;
-  if (!customerPhone) {
-    return res.status(400).json({ error: 'Customer has no phone number' });
+  const businessHours = business.business_hours as Record<string, any>;
+  if (!businessHours) {
+    return res.json({ date, slots: [] });
   }
 
-  // Validate phone number format
-  if (!customerPhone.match(/^\+?[1-9]\d{1,14}$/)) {
-    return res.status(400).json({ error: 'Invalid phone number format' });
+  // Determine day of week for the requested date
+  const requestedDate = new Date(date as string + 'T12:00:00');
+  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const dayName = dayNames[requestedDate.getDay()];
+  const dayConfig = businessHours[dayName];
+
+  if (!dayConfig || dayConfig.closed) {
+    return res.json({ date, slots: [] });
   }
 
-  // Fetch template based on business category
-  const businessCategory = appointment.business?.category || 'OTHER';
-  const { data: template } = await supabase
-    .from('b2b_reminder_templates')
-    .select('*')
-    .eq('category', businessCategory)
-    .single();
+  const openTime = dayConfig.open || '09:00';
+  const closeTime = dayConfig.close || '17:00';
 
-  log.info('Triggering reminder call', {
-    appointmentId: id,
-    customer: appointment.customer?.name,
-    phone: customerPhone,
-    scheduledAt: appointment.scheduled_at,
-    category: businessCategory,
-    hasTemplate: !!template,
-  });
+  // Get existing appointments for that date
+  const dateStr = date as string;
+  const startOfDay = `${dateStr}T00:00:00`;
+  const endOfDay = `${dateStr}T23:59:59`;
 
-  // Use LiveKit (Gemini voice) if available
-  if (livekitEnabled && sipClient && agentDispatch) {
-    try {
-      const roomName = `reminder-${id}-${Date.now()}`;
+  const { data: existingAppointments } = await supabase
+    .from('b2b_appointments')
+    .select('scheduled_at, duration_min')
+    .eq('business_id', business_id)
+    .gte('scheduled_at', startOfDay)
+    .lte('scheduled_at', endOfDay)
+    .in('status', ['SCHEDULED', 'CONFIRMED']);
 
-      // Prepare metadata with appointment and template data
-      const metadata = JSON.stringify({
-        call_type: 'reminder',
-        voice_preference: appointment.business?.voice_preference || 'Aoede',
-        appointment: {
-          id: appointment.id,
-          title: appointment.title,
-          scheduled_at: appointment.scheduled_at,
-          customer_name: appointment.customer?.name,
-          business_name: appointment.business?.name,
-          business_category: businessCategory,
-          business_timezone: appointment.customer?.timezone || appointment.business?.timezone || 'America/Los_Angeles',
-        },
-        template: template ? {
-          category: template.category,
-          system_prompt: template.system_prompt,
-          greeting: template.greeting,
-          confirmation_ask: template.confirmation_ask,
-          reschedule_ask: template.reschedule_ask,
-          closing: template.closing,
-          voicemail: template.voicemail,
-        } : null,
+  // Compute available slots
+  const slots: { start: string; end: string }[] = [];
+  const [openH, openM] = openTime.split(':').map(Number);
+  const [closeH, closeM] = closeTime.split(':').map(Number);
+  const openMinutes = openH * 60 + openM;
+  const closeMinutes = closeH * 60 + closeM;
+
+  // Generate slots in 30-minute increments
+  for (let startMin = openMinutes; startMin + duration <= closeMinutes; startMin += 30) {
+    const endMin = startMin + duration;
+
+    // Check for overlap with existing appointments
+    const slotStart = `${dateStr}T${String(Math.floor(startMin / 60)).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}:00`;
+    const slotEnd = `${dateStr}T${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}:00`;
+
+    const hasConflict = existingAppointments?.some(apt => {
+      const aptStart = new Date(apt.scheduled_at).getTime();
+      const aptEnd = aptStart + (apt.duration_min || 60) * 60 * 1000;
+      const slotStartTime = new Date(slotStart).getTime();
+      const slotEndTime = new Date(slotEnd).getTime();
+      return slotStartTime < aptEnd && slotEndTime > aptStart;
+    });
+
+    if (!hasConflict) {
+      slots.push({
+        start: `${String(Math.floor(startMin / 60)).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}`,
+        end: `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`,
       });
-
-      // Dispatch agent to room
-      await agentDispatch.createDispatch(roomName, config.livekitAgentName, {
-        metadata: metadata,
-      });
-
-      // Create outbound SIP call
-      const sipCall = await sipClient.createSipParticipant(
-        config.livekitSipTrunkId,
-        customerPhone,
-        roomName,
-        {
-          participantIdentity: `customer-${appointment.customer_id}`,
-          participantName: appointment.customer?.name || 'Customer',
-          playDialtone: false,
-        }
-      );
-
-      log.info('LiveKit reminder call created', { roomName, sipCallId: sipCall.sipCallId });
-
-      // Update appointment status
-      await supabase
-        .from('b2b_appointments')
-        .update({ status: 'REMINDED' })
-        .eq('id', id);
-
-      // Log the call
-      await supabase.from('b2b_call_logs').insert({
-        appointment_id: id,
-        customer_id: appointment.customer_id,
-        business_id: appointment.business_id,
-        call_type: 'REMINDER',
-        room_name: roomName,
-        sip_call_id: sipCall.sipCallId,
-      });
-
-      return res.json({
-        success: true,
-        message: 'Call initiated via Gemini AI',
-        room_name: roomName,
-        sip_call_id: sipCall.sipCallId,
-        template_used: template?.category || null,
-      });
-    } catch (error) {
-      log.error('LiveKit call failed, falling back to Telnyx', error);
     }
   }
 
-  // Fallback: Create call via Telnyx (basic TTS)
-  const call = await telnyx.calls.dial({
-    connection_id: config.telnyxConnectionId,
-    to: customerPhone,
-    from: config.telnyxPhoneNumber,
-    webhook_url: `${config.apiUrl}/api/webhooks/telnyx/call-events`,
-    webhook_url_method: 'POST',
-    custom_headers: [
-      { name: 'X-Appointment-Id', value: id },
-      { name: 'X-Customer-Name', value: appointment.customer?.name || 'Customer' },
-      { name: 'X-Appointment-Title', value: appointment.title },
-      { name: 'X-Appointment-Time', value: appointment.scheduled_at },
-      { name: 'X-Business-Name', value: appointment.business?.name || 'Our office' },
-      { name: 'X-Business-Category', value: businessCategory },
-      { name: 'X-Business-Timezone', value: appointment.customer?.timezone || appointment.business?.timezone || 'America/Los_Angeles' },
-    ],
-  });
+  res.json({ date, slots });
+}));
 
-  log.info('Telnyx call created', { callId: call.data?.call_control_id });
+// Book an appointment from an inbound call
+router.post('/api/appointments/book-inbound', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
+  const { business_id, caller_name, caller_phone, service, scheduled_at, duration_min, notes } = req.body;
 
-  // Update appointment status
-  await supabase
+  if (!business_id || !caller_name || !caller_phone || !scheduled_at) {
+    return res.status(400).json({ error: 'business_id, caller_name, caller_phone, and scheduled_at are required' });
+  }
+
+  const duration = duration_min || 60;
+
+  // Find or create customer by phone
+  let { data: customer } = await supabase
+    .from('b2b_customers')
+    .select('id')
+    .eq('business_id', business_id)
+    .eq('phone', caller_phone)
+    .single();
+
+  if (!customer) {
+    const { data: newCustomer, error: createError } = await supabase
+      .from('b2b_customers')
+      .insert({
+        business_id,
+        name: caller_name,
+        phone: caller_phone,
+      })
+      .select('id')
+      .single();
+
+    if (createError) {
+      log.error('Failed to create customer', createError);
+      return res.status(500).json({ error: 'Failed to create customer' });
+    }
+    customer = newCustomer;
+  }
+
+  // Create the appointment
+  const { data: appointment, error: aptError } = await supabase
     .from('b2b_appointments')
-    .update({ status: 'REMINDED' })
-    .eq('id', id);
+    .insert({
+      business_id,
+      customer_id: customer!.id,
+      title: service || 'Appointment',
+      description: notes || null,
+      scheduled_at,
+      duration_min: duration,
+      status: 'SCHEDULED',
+    })
+    .select()
+    .single();
 
-  // Log the call
-  await supabase.from('b2b_call_logs').insert({
-    appointment_id: id,
-    customer_id: appointment.customer_id,
-    business_id: appointment.business_id,
-    call_type: 'REMINDER',
-    sip_call_id: call.data?.call_control_id,
-  });
+  if (aptError) {
+    log.error('Failed to create appointment', aptError);
+    return res.status(500).json({ error: 'Failed to create appointment' });
+  }
 
-  res.json({
-    success: true,
-    message: 'Call initiated (basic TTS)',
-    call_id: call.data?.call_control_id,
-  });
+  log.info('Appointment booked from inbound call', { appointmentId: appointment.id, customer: caller_name });
+  res.status(201).json({ success: true, appointment });
 }));
 
 // Update appointment status (called by agent on confirm/cancel)

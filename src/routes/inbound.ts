@@ -51,8 +51,8 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
       // Look up business by phone number
       const { data: business, error: bizError } = await supabase
         .from('b2b_businesses')
-        .select('id, name, phone, receptionist_enabled, receptionist_greeting, business_hours, services, faqs, transfer_phone, receptionist_instructions, timezone')
-        .eq('phone', toNumber)
+        .select('id, name, phone, receptionist_enabled, receptionist_greeting, business_hours, services, faqs, transfer_phone, receptionist_instructions, timezone, voice_preference, booking_enabled, default_appointment_duration, booking_advance_days, category')
+        .eq('telnyx_phone_number', toNumber)
         .single();
 
       if (bizError || !business) {
@@ -133,6 +133,11 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
         call_log_id: callLog.id,
         caller_phone: fromNumber,
         is_after_hours: isAfterHours,
+        voice_preference: business.voice_preference || 'Aoede',
+        booking_enabled: business.booking_enabled || false,
+        default_appointment_duration: business.default_appointment_duration || 60,
+        booking_advance_days: business.booking_advance_days || 14,
+        business_category: business.category || 'OTHER',
       };
 
       try {

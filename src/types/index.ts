@@ -9,12 +9,6 @@ export interface AuthenticatedRequest extends Request {
   };
 }
 
-export interface GeminiSession {
-  callControlId: string;
-  liveSession: any;
-  systemPrompt: string;
-}
-
 export interface BusinessHoursDay {
   open: string;
   close: string;
@@ -60,12 +54,21 @@ export interface Message {
   updated_at: string;
 }
 
+export interface ServiceEntry {
+  name: string;
+  description?: string;
+  price_min?: number;
+  price_max?: number;
+  duration_min?: number;
+  is_emergency?: boolean;
+}
+
 export interface InboundCallMetadata {
   call_type: 'inbound_receptionist';
   business_id: string;
   business_name: string;
   receptionist_greeting: string | null;
-  services: string[];
+  services: (string | ServiceEntry)[];
   faqs: FAQEntry[];
   business_hours: BusinessHours;
   transfer_phone: string | null;
@@ -73,4 +76,9 @@ export interface InboundCallMetadata {
   call_log_id: string;
   caller_phone: string;
   is_after_hours: boolean;
+  voice_preference: string;
+  booking_enabled: boolean;
+  default_appointment_duration: number;
+  booking_advance_days: number;
+  business_category: string;
 }
