@@ -92,7 +92,7 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
           sip_call_id: callControlId,
           to_number: toNumber,
           from_number: fromNumber,
-          call_outcome: 'INITIATED',
+          call_outcome: 'ANSWERED',
         })
         .select('id')
         .single();
