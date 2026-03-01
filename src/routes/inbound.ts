@@ -119,12 +119,13 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
       }
 
       try {
-        // Transfer the call to LiveKit using the DID phone number
-        // LiveKit's inbound trunk matches on this number and creates a room
+        // Answer the call first, then transfer to LiveKit
+        // LiveKit's inbound trunk matches on the DID number and creates a room
         // The dispatch rule auto-dispatches the agent
         const sipUri = `sip:${toNumber}@${config.livekitSipUri}`;
         log.info('Transferring inbound call to LiveKit', { sipUri, callLogId: callLog.id });
 
+        await telnyx.calls.actions.answer(callControlId, {});
         await telnyx.calls.actions.transfer(callControlId, {
           to: sipUri,
         });
