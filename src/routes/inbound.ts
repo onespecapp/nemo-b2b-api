@@ -141,13 +141,17 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
       };
 
       try {
-        // Dispatch agent to room first
+        // Answer the call first (required before transfer)
+        log.info('Answering inbound call before transfer', { callControlId });
+        await telnyx.calls.actions.answer(callControlId, {});
+
+        // Dispatch agent to room
         log.info('Dispatching agent for inbound call', { roomName, agentName: config.livekitAgentName });
         await agentDispatch.createDispatch(roomName, config.livekitAgentName, {
           metadata: JSON.stringify(metadata),
         });
 
-        // Transfer the inbound call to LiveKit's SIP trunk
+        // Transfer the answered call to LiveKit's SIP trunk
         // This connects the caller directly to the LiveKit room via SIP
         const sipUri = `sip:${roomName}@${config.livekitSipUri}`;
         log.info('Transferring inbound call to LiveKit', { roomName, sipUri, callLogId: callLog.id });
