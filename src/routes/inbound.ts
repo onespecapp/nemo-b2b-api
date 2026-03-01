@@ -27,6 +27,9 @@ function isWithinBusinessHours(businessHours: BusinessHours, timezone?: string):
   return currentTime >= dayConfig.open && currentTime < dayConfig.close;
 }
 
+// In-memory store for pending transfers (call answered -> transfer to LiveKit)
+const pendingTransfers = new Map<string, { toNumber: string; callLogId: string; businessName: string }>();
+
 // Inbound call webhook handler
 router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(async (req: Request, res: Response) => {
   const event = req.body;
@@ -102,7 +105,7 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
         return res.json({ received: true });
       }
 
-      // Set up LiveKit SIP transfer
+      // Check LiveKit SIP config
       if (!config.livekitSipUri) {
         log.error('LiveKit SIP URI not configured for inbound calls');
         try {
@@ -118,51 +121,72 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
         return res.json({ received: true });
       }
 
+      // Store transfer info and answer the call
+      // Transfer will happen in call.answered handler once the call is fully established
+      pendingTransfers.set(callControlId, {
+        toNumber,
+        callLogId: callLog.id,
+        businessName: business.name,
+      });
+
       try {
-        // Answer the call first, then transfer to LiveKit
-        // LiveKit's inbound trunk matches on the DID number and creates a room
-        // The dispatch rule auto-dispatches the agent
-        const sipUri = `sip:${toNumber}@${config.livekitSipUri}`;
-        log.info('Transferring inbound call to LiveKit', { sipUri, callLogId: callLog.id });
-
+        log.info('Answering call, will transfer to LiveKit on answered', { callControlId });
         await telnyx.calls.actions.answer(callControlId, {});
-        await telnyx.calls.actions.transfer(callControlId, {
-          to: sipUri,
-        });
-
-        // Update call log
-        await supabase
-          .from('b2b_call_logs')
-          .update({ call_outcome: 'CONNECTED' })
-          .eq('id', callLog.id);
       } catch (error) {
-        log.error('Failed to transfer call to LiveKit', error);
-        try {
-          await telnyx.calls.actions.answer(callControlId, {});
-          await telnyx.calls.actions.speak(callControlId, {
-            payload: `Thank you for calling ${business.name}. We are experiencing technical difficulties. Please try again later. Goodbye!`,
-            voice: 'female',
-            language: 'en-US',
-          });
-        } catch (e) {
-          log.error('Failed to play error message', e);
-        }
+        log.error('Failed to answer call', error);
+        pendingTransfers.delete(callControlId);
       }
 
       break;
     }
 
-    case 'call.answered':
+    case 'call.answered': {
       log.info('Inbound call answered', { callControlId });
-      await supabase
-        .from('b2b_call_logs')
-        .update({ call_outcome: 'ANSWERED' })
-        .eq('sip_call_id', callControlId);
+
+      // Check if this call has a pending transfer to LiveKit
+      const transferInfo = pendingTransfers.get(callControlId);
+      if (transferInfo) {
+        pendingTransfers.delete(callControlId);
+
+        const sipUri = `sip:${transferInfo.toNumber}@${config.livekitSipUri}`;
+        log.info('Call answered, now transferring to LiveKit', { sipUri, callLogId: transferInfo.callLogId });
+
+        try {
+          await telnyx.calls.actions.transfer(callControlId, {
+            to: sipUri,
+          });
+
+          await supabase
+            .from('b2b_call_logs')
+            .update({ call_outcome: 'CONNECTED' })
+            .eq('id', transferInfo.callLogId);
+        } catch (error) {
+          log.error('Failed to transfer call to LiveKit', error);
+          try {
+            await telnyx.calls.actions.speak(callControlId, {
+              payload: `Thank you for calling ${transferInfo.businessName}. We are experiencing technical difficulties. Please try again later. Goodbye!`,
+              voice: 'female',
+              language: 'en-US',
+            });
+          } catch (e) {
+            log.error('Failed to play error message', e);
+          }
+        }
+      } else {
+        await supabase
+          .from('b2b_call_logs')
+          .update({ call_outcome: 'ANSWERED' })
+          .eq('sip_call_id', callControlId);
+      }
       break;
+    }
 
     case 'call.hangup': {
       const duration = event.data?.payload?.duration_secs;
       log.info('Inbound call ended', { callControlId, duration });
+
+      // Clean up any pending transfer
+      pendingTransfers.delete(callControlId);
 
       await supabase
         .from('b2b_call_logs')
