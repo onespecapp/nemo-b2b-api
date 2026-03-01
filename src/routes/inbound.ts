@@ -102,9 +102,9 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
         return res.json({ received: true });
       }
 
-      // Set up LiveKit room and agent
-      if (!livekitEnabled || !agentDispatch || !config.livekitSipUri) {
-        log.error('LiveKit not configured for inbound calls');
+      // Set up LiveKit SIP transfer
+      if (!config.livekitSipUri) {
+        log.error('LiveKit SIP URI not configured for inbound calls');
         try {
           await telnyx.calls.actions.answer(callControlId, {});
           await telnyx.calls.actions.speak(callControlId, {
@@ -118,55 +118,24 @@ router.post('/api/webhooks/telnyx/inbound', validateTelnyxWebhook, asyncHandler(
         return res.json({ received: true });
       }
 
-      const roomName = `inbound-${Date.now()}`;
-
-      const metadata: InboundCallMetadata = {
-        call_type: 'inbound_receptionist',
-        business_id: business.id,
-        business_name: business.name,
-        receptionist_greeting: business.receptionist_greeting,
-        services: business.services || [],
-        faqs: business.faqs || [],
-        business_hours: businessHours,
-        transfer_phone: business.transfer_phone,
-        receptionist_instructions: business.receptionist_instructions,
-        call_log_id: callLog.id,
-        caller_phone: fromNumber,
-        is_after_hours: isAfterHours,
-        voice_preference: business.voice_preference || 'Aoede',
-        booking_enabled: business.booking_enabled || false,
-        default_appointment_duration: business.default_appointment_duration || 60,
-        booking_advance_days: business.booking_advance_days || 14,
-        business_category: business.category || 'OTHER',
-      };
-
       try {
-        // Answer the call first (required before transfer)
-        log.info('Answering inbound call before transfer', { callControlId });
-        await telnyx.calls.actions.answer(callControlId, {});
-
-        // Dispatch agent to room
-        log.info('Dispatching agent for inbound call', { roomName, agentName: config.livekitAgentName });
-        await agentDispatch.createDispatch(roomName, config.livekitAgentName, {
-          metadata: JSON.stringify(metadata),
-        });
-
-        // Transfer the answered call to LiveKit's SIP trunk
-        // This connects the caller directly to the LiveKit room via SIP
-        const sipUri = `sip:${roomName}@${config.livekitSipUri}`;
-        log.info('Transferring inbound call to LiveKit', { roomName, sipUri, callLogId: callLog.id });
+        // Transfer the call to LiveKit using the DID phone number
+        // LiveKit's inbound trunk matches on this number and creates a room
+        // The dispatch rule auto-dispatches the agent
+        const sipUri = `sip:${toNumber}@${config.livekitSipUri}`;
+        log.info('Transferring inbound call to LiveKit', { sipUri, callLogId: callLog.id });
 
         await telnyx.calls.actions.transfer(callControlId, {
           to: sipUri,
         });
 
-        // Update call log with room name
+        // Update call log
         await supabase
           .from('b2b_call_logs')
-          .update({ call_outcome: 'CONNECTED', room_name: roomName })
+          .update({ call_outcome: 'CONNECTED' })
           .eq('id', callLog.id);
       } catch (error) {
-        log.error('Failed to set up LiveKit for inbound call', error);
+        log.error('Failed to transfer call to LiveKit', error);
         try {
           await telnyx.calls.actions.answer(callControlId, {});
           await telnyx.calls.actions.speak(callControlId, {

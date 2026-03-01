@@ -103,14 +103,14 @@ router.post('/api/business/receptionist/toggle', authenticateUser, asyncHandler(
   res.json({ receptionist_enabled: updated.receptionist_enabled });
 }));
 
-// Look up business receptionist config by phone number (internal, for voice agent)
+// Look up business receptionist config by Telnyx phone number (internal, for voice agent)
 router.get('/api/business/by-phone/:phone', authenticateInternal, asyncHandler(async (req: Request, res: Response) => {
   const phone = req.params.phone;
 
   const { data: business, error } = await supabase
     .from('b2b_businesses')
-    .select('id, name, phone, receptionist_enabled, receptionist_greeting, business_hours, services, faqs, transfer_phone, receptionist_instructions, timezone')
-    .eq('phone', phone)
+    .select('id, name, phone, telnyx_phone_number, receptionist_enabled, receptionist_greeting, business_hours, services, faqs, transfer_phone, receptionist_instructions, timezone, voice_preference, booking_enabled, default_appointment_duration, booking_advance_days, category')
+    .or(`telnyx_phone_number.eq.${phone},phone.eq.${phone}`)
     .single();
 
   if (error || !business) {
