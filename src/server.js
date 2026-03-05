@@ -638,6 +638,37 @@ async function sendTelnyxCommand(callControlId, action, payload = {}) {
   });
 }
 
+async function sendSmsNotification(fromNumber, toNumber, text) {
+  if (!telnyxApiKey) {
+    log("sms_skip", { reason: "TELNYX_API_KEY not set" });
+    return;
+  }
+  if (!fromNumber || !toNumber) {
+    log("sms_skip", { reason: "missing from/to number", fromNumber, toNumber });
+    return;
+  }
+  try {
+    const messagingProfileId = process.env.TELNYX_MESSAGING_PROFILE_ID || "";
+    const payload = {
+      from: fromNumber,
+      to: toNumber,
+      text: text.slice(0, 1600),
+    };
+    if (messagingProfileId) {
+      payload.messaging_profile_id = messagingProfileId;
+    }
+    await axios.post(`${telnyxBaseUrl}/messages`, payload, {
+      headers: {
+        Authorization: `Bearer ${telnyxApiKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+    log("sms_sent", { from: fromNumber, to: toNumber });
+  } catch (err) {
+    log("sms_send_failed", { from: fromNumber, to: toNumber, error: err?.response?.data || err.message });
+  }
+}
+
 async function telnyxWebhookHandler(req, res) {
   const eventType = extractEventType(req.body);
   const callControlId = extractCallControlId(req.body);
@@ -960,7 +991,7 @@ app.post("/internal/calls/end", requireInternalAuth, async (req, res) => {
 
     const { data: businessData } = await admin
       .from("b2b_businesses")
-      .select("name, category")
+      .select("name, category, telnyx_phone_number, transfer_phone")
       .eq("id", callLog.business_id)
       .maybeSingle();
 
@@ -1030,6 +1061,9 @@ app.post("/internal/calls/end", requireInternalAuth, async (req, res) => {
 
         if (messageError) {
           log("message_insert_failed", { callLogId, message: messageError.message });
+        } else if (businessData?.transfer_phone && businessData?.telnyx_phone_number) {
+          const smsBody = `New message from ${callerName || callerPhone || "unknown caller"}:\n${messageText}${urgency === "urgent" ? "\n⚠️ URGENT" : ""}`;
+          sendSmsNotification(businessData.telnyx_phone_number, businessData.transfer_phone, smsBody);
         }
       }
     }
