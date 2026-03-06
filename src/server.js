@@ -991,7 +991,7 @@ app.post("/internal/calls/end", requireInternalAuth, async (req, res) => {
 
     const { data: businessData } = await admin
       .from("b2b_businesses")
-      .select("name, category, telnyx_phone_number, transfer_phone")
+      .select("name, category, telnyx_phone_number, transfer_phone, agent_config")
       .eq("id", callLog.business_id)
       .maybeSingle();
 
@@ -1061,11 +1061,18 @@ app.post("/internal/calls/end", requireInternalAuth, async (req, res) => {
 
         if (messageError) {
           log("message_insert_failed", { callLogId, message: messageError.message });
-        } else if (businessData?.transfer_phone && businessData?.telnyx_phone_number) {
-          const smsBody = `New message from ${callerName || callerPhone || "unknown caller"}:\n${messageText}${urgency === "urgent" ? "\n⚠️ URGENT" : ""}`;
-          sendSmsNotification(businessData.telnyx_phone_number, businessData.transfer_phone, smsBody);
         }
       }
+    }
+
+    // Send post-call SMS notification if enabled
+    const agentConfig = businessData?.agent_config || {};
+    if (agentConfig.smsNotificationsEnabled && businessData?.transfer_phone && businessData?.telnyx_phone_number) {
+      const summary = geminiTranscriptPostprocess?.summary || providedSummary || derivedSummary || "No summary available";
+      const callerInfo = customerName || customerPhone || "Unknown caller";
+      const durationMin = durationSec ? `${Math.ceil(durationSec / 60)} min` : "";
+      const smsBody = `Call from ${callerInfo}${durationMin ? ` (${durationMin})` : ""}\n${summary}`;
+      sendSmsNotification(businessData.telnyx_phone_number, businessData.transfer_phone, smsBody);
     }
 
     if (qualityPayload) {
