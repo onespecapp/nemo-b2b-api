@@ -552,6 +552,7 @@ async function findBusinessForOwner(admin, ownerId, businessId) {
 }
 
 async function resolveBusinessForCall(admin, payload) {
+  console.log("[resolveBusinessForCall] payload.business_id:", payload.business_id, "payload.called_phone:", payload.called_phone);
   if (payload.business_id) {
     const { data, error } = await admin
       .from("b2b_businesses")
@@ -570,6 +571,7 @@ async function resolveBusinessForCall(admin, payload) {
   }
 
   const calledCandidates = candidatePhoneValues(payload.called_phone);
+  console.log("[resolveBusinessForCall] calledCandidates:", calledCandidates);
   if (calledCandidates.length > 0) {
     const { data, error } = await admin
       .from("b2b_businesses")
@@ -581,11 +583,13 @@ async function resolveBusinessForCall(admin, payload) {
       throw new Error(`business_lookup_by_phone_failed: ${error.message}`);
     }
 
+    console.log("[resolveBusinessForCall] phone lookup result:", data?.length, data?.[0]?.name);
     if (data && data.length > 0) {
       return data[0];
     }
   }
 
+  console.log("[resolveBusinessForCall] phone lookup missed, falling back. DEFAULT_BUSINESS_ID:", defaultBusinessId);
   if (defaultBusinessId) {
     const { data, error } = await admin
       .from("b2b_businesses")
