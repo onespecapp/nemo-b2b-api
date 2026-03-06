@@ -638,19 +638,24 @@ async function sendTelnyxCommand(callControlId, action, payload = {}) {
   });
 }
 
-async function sendSmsNotification(fromNumber, toNumber, text) {
+async function sendSmsNotification(toNumber, text) {
+  const smsFromNumber = process.env.TELNYX_SMS_FROM_NUMBER;
   if (!telnyxApiKey) {
     log("sms_skip", { reason: "TELNYX_API_KEY not set" });
     return;
   }
-  if (!fromNumber || !toNumber) {
-    log("sms_skip", { reason: "missing from/to number", fromNumber, toNumber });
+  if (!smsFromNumber) {
+    log("sms_skip", { reason: "TELNYX_SMS_FROM_NUMBER not set" });
+    return;
+  }
+  if (!toNumber) {
+    log("sms_skip", { reason: "missing to number" });
     return;
   }
   try {
     const messagingProfileId = process.env.TELNYX_MESSAGING_PROFILE_ID || "";
     const payload = {
-      from: fromNumber,
+      from: smsFromNumber,
       to: toNumber,
       text: text.slice(0, 1600),
     };
@@ -663,9 +668,9 @@ async function sendSmsNotification(fromNumber, toNumber, text) {
         "Content-Type": "application/json",
       },
     });
-    log("sms_sent", { from: fromNumber, to: toNumber });
+    log("sms_sent", { from: smsFromNumber, to: toNumber });
   } catch (err) {
-    log("sms_send_failed", { from: fromNumber, to: toNumber, error: err?.response?.data || err.message });
+    log("sms_send_failed", { from: smsFromNumber, to: toNumber, error: err?.response?.data || err.message });
   }
 }
 
@@ -1072,7 +1077,7 @@ app.post("/internal/calls/end", requireInternalAuth, async (req, res) => {
       const callerInfo = customerName || customerPhone || "Unknown caller";
       const durationMin = durationSec ? `${Math.ceil(durationSec / 60)} min` : "";
       const smsBody = `Call from ${callerInfo}${durationMin ? ` (${durationMin})` : ""}\n${summary}`;
-      sendSmsNotification(businessData.telnyx_phone_number, businessData.transfer_phone, smsBody);
+      sendSmsNotification(businessData.transfer_phone, smsBody);
     }
 
     if (qualityPayload) {
