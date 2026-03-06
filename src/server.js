@@ -1257,14 +1257,19 @@ app.post("/internal/calls/transfer", requireInternalAuth, async (req, res) => {
     }
 
     const sipClient = new SipClient(livekitUrl, livekitApiKey, livekitApiSecret);
-    await sipClient.createSipParticipant(
+
+    // Fire-and-forget: don't block on the human answering.
+    // The agent will detect the new participant joining the room.
+    sipClient.createSipParticipant(
       livekitSipOutboundTrunkId,
       business.transfer_phone,
       roomName,
-      { participantName: "Human Staff" }
-    );
+      { participantName: "Human Staff", playDialtone: false }
+    ).catch((err) => {
+      log("sip_transfer_dial_failed", { callLogId, businessId, roomName, message: err?.message || String(err) });
+    });
 
-    log("call_transferred", { callLogId, businessId, roomName, transferPhone: business.transfer_phone });
+    log("call_transfer_initiated", { callLogId, businessId, roomName, transferPhone: business.transfer_phone });
     res.status(200).json({ success: true });
   } catch (error) {
     log("internal_call_transfer_failed", { message: error?.message || String(error) });
