@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import { postProcessTranscriptWithGemini } from "./transcriptPostprocess.js";
 import { SipClient } from "livekit-server-sdk";
+import Stripe from "stripe";
 
 dotenv.config();
 
@@ -42,6 +43,31 @@ const livekitApiKey = process.env.LIVEKIT_API_KEY || "";
 const livekitApiSecret = process.env.LIVEKIT_API_SECRET || "";
 const livekitSipOutboundTrunkId = process.env.LIVEKIT_SIP_OUTBOUND_TRUNK_ID || "";
 
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY || "";
+const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET || "";
+const stripeStarterPriceId = process.env.STRIPE_STARTER_PRICE_ID || "";
+const stripeProPriceId = process.env.STRIPE_PRO_PRICE_ID || "";
+const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3001";
+
+const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null;
+
+function stripePriceToTier(priceId) {
+  if (priceId === stripeStarterPriceId) return "STARTER";
+  if (priceId === stripeProPriceId) return "PRO";
+  return "FREE";
+}
+
+function stripeStatusToSubscriptionStatus(status) {
+  switch (status) {
+    case "active": return "ACTIVE";
+    case "trialing": return "TRIALING";
+    case "past_due": return "PAST_DUE";
+    case "canceled":
+    case "unpaid": return "CANCELED";
+    default: return "CANCELED";
+  }
+}
+
 const supabaseAdmin =
   supabaseUrl && supabaseSecretKey
     ? createClient(supabaseUrl, supabaseSecretKey, {
@@ -64,6 +90,106 @@ app.use(
     credentials: true
   })
 );
+// Stripe webhook must be registered BEFORE express.json() — requires raw body for signature verification
+app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+  if (!stripe || !stripeWebhookSecret) {
+    res.status(500).json({ error: "stripe_not_configured" });
+    return;
+  }
+
+  let event;
+  try {
+    const sig = req.headers["stripe-signature"];
+    event = stripe.webhooks.constructEvent(req.body, sig, stripeWebhookSecret);
+  } catch (err) {
+    log("stripe_webhook_signature_failed", { message: err.message });
+    res.status(400).json({ error: "invalid_signature" });
+    return;
+  }
+
+  const admin = requireSupabase();
+
+  try {
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = event.data.object;
+        const businessId = session.metadata?.business_id;
+        if (!businessId || !session.subscription) break;
+
+        const subscription = await stripe.subscriptions.retrieve(session.subscription);
+        const priceId = subscription.items.data[0]?.price?.id;
+        const tier = stripePriceToTier(priceId);
+        const status = stripeStatusToSubscriptionStatus(subscription.status);
+
+        const { error } = await admin
+          .from("b2b_businesses")
+          .update({
+            stripe_customer_id: session.customer,
+            subscription_tier: tier,
+            subscription_status: status,
+          })
+          .eq("id", businessId);
+
+        if (error) {
+          log("stripe_webhook_db_error", { event: event.type, message: error.message });
+        } else {
+          log("stripe_checkout_completed", { businessId, tier, status });
+        }
+        break;
+      }
+
+      case "customer.subscription.updated": {
+        const subscription = event.data.object;
+        const customerId = subscription.customer;
+        const priceId = subscription.items.data[0]?.price?.id;
+        const tier = stripePriceToTier(priceId);
+        const status = stripeStatusToSubscriptionStatus(subscription.status);
+
+        const { error } = await admin
+          .from("b2b_businesses")
+          .update({
+            subscription_tier: tier,
+            subscription_status: status,
+          })
+          .eq("stripe_customer_id", customerId);
+
+        if (error) {
+          log("stripe_webhook_db_error", { event: event.type, message: error.message });
+        } else {
+          log("stripe_subscription_updated", { customerId, tier, status });
+        }
+        break;
+      }
+
+      case "customer.subscription.deleted": {
+        const subscription = event.data.object;
+        const customerId = subscription.customer;
+
+        const { error } = await admin
+          .from("b2b_businesses")
+          .update({
+            subscription_tier: "FREE",
+            subscription_status: "CANCELED",
+          })
+          .eq("stripe_customer_id", customerId);
+
+        if (error) {
+          log("stripe_webhook_db_error", { event: event.type, message: error.message });
+        } else {
+          log("stripe_subscription_deleted", { customerId });
+        }
+        break;
+      }
+    }
+  } catch (err) {
+    log("stripe_webhook_handler_error", { event: event.type, message: err.message });
+    res.status(500).json({ error: "webhook_handler_failed" });
+    return;
+  }
+
+  res.json({ received: true });
+});
+
 app.use(express.json({ limit: "1mb" }));
 
 function log(event, details = {}) {
@@ -1360,6 +1486,105 @@ app.post("/internal/appointments/book", requireInternalAuth, async (req, res) =>
   } catch (error) {
     log("appointment_booking_failed", { message: error?.message || String(error) });
     res.status(500).json({ error: "appointment_booking_failed", message: error?.message || "unknown_error" });
+  }
+});
+
+// ── Stripe Billing Routes ──
+
+app.post("/api/billing/create-checkout-session", requireAuth, async (req, res) => {
+  if (!stripe) {
+    res.status(500).json({ error: "stripe_not_configured" });
+    return;
+  }
+
+  try {
+    const admin = requireSupabase();
+    const { price_id } = req.body;
+
+    if (price_id !== stripeStarterPriceId && price_id !== stripeProPriceId) {
+      res.status(400).json({ error: "invalid_price_id" });
+      return;
+    }
+
+    const business = await findBusinessForOwner(admin, req.auth.user.id);
+    if (!business) {
+      res.status(404).json({ error: "business_not_found" });
+      return;
+    }
+
+    // Look up existing stripe_customer_id
+    const { data: bizData } = await admin
+      .from("b2b_businesses")
+      .select("stripe_customer_id")
+      .eq("id", business.id)
+      .single();
+
+    let customerId = bizData?.stripe_customer_id;
+
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: req.auth.user.email,
+        metadata: { business_id: business.id },
+      });
+      customerId = customer.id;
+
+      await admin
+        .from("b2b_businesses")
+        .update({ stripe_customer_id: customerId })
+        .eq("id", business.id);
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      mode: "subscription",
+      line_items: [{ price: price_id, quantity: 1 }],
+      success_url: `${frontendUrl}/dashboard/settings?billing=success`,
+      cancel_url: `${frontendUrl}/dashboard/settings?billing=canceled`,
+      metadata: { business_id: business.id },
+    });
+
+    res.json({ url: session.url });
+  } catch (error) {
+    log("checkout_session_failed", { message: error?.message || String(error) });
+    res.status(500).json({ error: "checkout_session_failed", message: error?.message || "unknown_error" });
+  }
+});
+
+app.post("/api/billing/create-portal-session", requireAuth, async (req, res) => {
+  if (!stripe) {
+    res.status(500).json({ error: "stripe_not_configured" });
+    return;
+  }
+
+  try {
+    const admin = requireSupabase();
+
+    const business = await findBusinessForOwner(admin, req.auth.user.id);
+    if (!business) {
+      res.status(404).json({ error: "business_not_found" });
+      return;
+    }
+
+    const { data: bizData } = await admin
+      .from("b2b_businesses")
+      .select("stripe_customer_id")
+      .eq("id", business.id)
+      .single();
+
+    if (!bizData?.stripe_customer_id) {
+      res.status(400).json({ error: "no_stripe_customer" });
+      return;
+    }
+
+    const portalSession = await stripe.billingPortal.sessions.create({
+      customer: bizData.stripe_customer_id,
+      return_url: `${frontendUrl}/dashboard/settings`,
+    });
+
+    res.json({ url: portalSession.url });
+  } catch (error) {
+    log("portal_session_failed", { message: error?.message || String(error) });
+    res.status(500).json({ error: "portal_session_failed", message: error?.message || "unknown_error" });
   }
 });
 
