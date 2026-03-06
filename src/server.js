@@ -768,8 +768,8 @@ async function sendTelnyxCommand(callControlId, action, payload = {}) {
   });
 }
 
-async function sendSmsNotification(toNumber, text) {
-  const smsFromNumber = process.env.TELNYX_SMS_FROM_NUMBER;
+async function sendSmsNotification(toNumber, text, fromNumber) {
+  const smsFromNumber = fromNumber || process.env.TELNYX_SMS_FROM_NUMBER;
   if (!telnyxApiKey) {
     log("sms_skip", { reason: "TELNYX_API_KEY not set" });
     return;
@@ -1202,14 +1202,23 @@ app.post("/internal/calls/end", requireInternalAuth, async (req, res) => {
       }
     }
 
-    // Send post-call SMS notification if enabled
+    // Send post-call SMS notifications
     const agentConfig = businessData?.agent_config || {};
-    if (agentConfig.smsNotificationsEnabled && businessData?.transfer_phone && businessData?.telnyx_phone_number) {
+
+    // Owner SMS: call summary to transfer_phone
+    if (agentConfig.smsNotifyOwner && businessData?.transfer_phone && businessData?.telnyx_phone_number) {
       const summary = geminiTranscriptPostprocess?.summary || providedSummary || derivedSummary || "No summary available";
       const callerInfo = customerName || customerPhone || "Unknown caller";
       const durationMin = durationSec ? `${Math.ceil(durationSec / 60)} min` : "";
       const smsBody = `Call from ${callerInfo}${durationMin ? ` (${durationMin})` : ""}\n${summary}`;
       sendSmsNotification(businessData.transfer_phone, smsBody);
+    }
+
+    // Customer SMS: thank-you text to caller from the business's number
+    if (agentConfig.smsNotifyCustomer && customerPhone && businessData?.telnyx_phone_number) {
+      const bizName = businessData.name || "us";
+      const customerSmsBody = `Thanks for calling ${bizName}! We've noted your inquiry and our team will follow up shortly.`;
+      sendSmsNotification(customerPhone, customerSmsBody, businessData.telnyx_phone_number);
     }
 
     if (qualityPayload) {
