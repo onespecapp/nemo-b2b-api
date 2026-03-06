@@ -1247,7 +1247,13 @@ app.post("/internal/calls/transfer", requireInternalAuth, async (req, res) => {
     }
 
     if (!livekitUrl || !livekitApiKey || !livekitApiSecret || !livekitSipOutboundTrunkId) {
-      throw new Error("Missing LiveKit SIP configuration for transfer");
+      const missing = [
+        !livekitUrl && "LIVEKIT_URL",
+        !livekitApiKey && "LIVEKIT_API_KEY",
+        !livekitApiSecret && "LIVEKIT_API_SECRET",
+        !livekitSipOutboundTrunkId && "LIVEKIT_SIP_OUTBOUND_TRUNK_ID",
+      ].filter(Boolean).join(", ");
+      throw new Error(`Missing LiveKit SIP env vars: ${missing}`);
     }
 
     const sipClient = new SipClient(livekitUrl, livekitApiKey, livekitApiSecret);
