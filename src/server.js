@@ -1211,7 +1211,7 @@ app.post("/internal/calls/end", requireInternalAuth, async (req, res) => {
       const callerInfo = customerName || customerPhone || "Unknown caller";
       const durationMin = durationSec ? `${Math.ceil(durationSec / 60)} min` : "";
       const smsBody = `Call from ${callerInfo}${durationMin ? ` (${durationMin})` : ""}\n${summary}`;
-      sendSmsNotification(businessData.transfer_phone, smsBody);
+      sendSmsNotification(businessData.transfer_phone, smsBody, businessData.telnyx_phone_number);
     }
 
     // Customer SMS: thank-you text to caller from the business's number
