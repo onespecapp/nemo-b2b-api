@@ -1264,7 +1264,7 @@ app.post("/internal/calls/transfer", requireInternalAuth, async (req, res) => {
       livekitSipOutboundTrunkId,
       business.transfer_phone,
       roomName,
-      { participantName: "Human Staff", playDialtone: false }
+      { participantName: "Human Staff", playDialtone: false, playRingtone: false }
     ).catch((err) => {
       log("sip_transfer_dial_failed", { callLogId, businessId, roomName, message: err?.message || String(err) });
     });
