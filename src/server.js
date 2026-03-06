@@ -555,7 +555,7 @@ async function resolveBusinessForCall(admin, payload) {
   if (payload.business_id) {
     const { data, error } = await admin
       .from("b2b_businesses")
-      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config")
+      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone")
       .eq("id", payload.business_id)
       .limit(1)
       .maybeSingle();
@@ -573,7 +573,7 @@ async function resolveBusinessForCall(admin, payload) {
   if (calledCandidates.length > 0) {
     const { data, error } = await admin
       .from("b2b_businesses")
-      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config")
+      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone")
       .in("telnyx_phone_number", calledCandidates)
       .limit(1);
 
@@ -589,7 +589,7 @@ async function resolveBusinessForCall(admin, payload) {
   if (defaultBusinessId) {
     const { data, error } = await admin
       .from("b2b_businesses")
-      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config")
+      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone")
       .eq("id", defaultBusinessId)
       .limit(1)
       .maybeSingle();
@@ -605,7 +605,7 @@ async function resolveBusinessForCall(admin, payload) {
 
   const { data, error } = await admin
     .from("b2b_businesses")
-    .select("id, name, category, voice_preference, telnyx_phone_number, agent_config")
+    .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone")
     .order("created_at", { ascending: true })
     .limit(2);
 
@@ -1017,6 +1017,7 @@ app.post("/internal/calls/start", requireInternalAuth, async (req, res) => {
         business_category: business.category || null,
         voice_preference: business.voice_preference || null,
         agent_config: business.agent_config || {},
+        transfer_phone: business.transfer_phone || null,
         customer_id: customer?.id || null,
         reused: true
       });
@@ -1049,6 +1050,7 @@ app.post("/internal/calls/start", requireInternalAuth, async (req, res) => {
       business_category: business.category || null,
       voice_preference: business.voice_preference || null,
       agent_config: business.agent_config || {},
+      transfer_phone: business.transfer_phone || null,
       customer_id: customer?.id || null,
       reused: false
     });
@@ -1214,6 +1216,53 @@ app.post("/internal/calls/end", requireInternalAuth, async (req, res) => {
   } catch (error) {
     log("internal_call_end_failed", { message: error?.message || String(error) });
     res.status(500).json({ error: "internal_call_end_failed", message: error?.message || "unknown_error" });
+  }
+});
+
+app.post("/internal/calls/transfer", requireInternalAuth, async (req, res) => {
+  try {
+    const admin = requireSupabase();
+    const roomName = typeof req.body?.room_name === "string" ? req.body.room_name.trim() : "";
+    const businessId = typeof req.body?.business_id === "string" ? req.body.business_id.trim() : "";
+    const callLogId = typeof req.body?.call_log_id === "string" ? req.body.call_log_id.trim() : "";
+
+    if (!roomName || !businessId) {
+      res.status(400).json({ error: "missing_room_name_or_business_id" });
+      return;
+    }
+
+    const { data: business, error: bizError } = await admin
+      .from("b2b_businesses")
+      .select("transfer_phone")
+      .eq("id", businessId)
+      .maybeSingle();
+
+    if (bizError) {
+      throw new Error(`business_lookup_failed: ${bizError.message}`);
+    }
+
+    if (!business?.transfer_phone) {
+      res.status(400).json({ error: "no_transfer_phone", message: "Business does not have a transfer phone number configured." });
+      return;
+    }
+
+    if (!livekitUrl || !livekitApiKey || !livekitApiSecret || !livekitSipOutboundTrunkId) {
+      throw new Error("Missing LiveKit SIP configuration for transfer");
+    }
+
+    const sipClient = new SipClient(livekitUrl, livekitApiKey, livekitApiSecret);
+    await sipClient.createSipParticipant(
+      livekitSipOutboundTrunkId,
+      business.transfer_phone,
+      roomName,
+      { participantName: "Human Staff" }
+    );
+
+    log("call_transferred", { callLogId, businessId, roomName, transferPhone: business.transfer_phone });
+    res.status(200).json({ success: true });
+  } catch (error) {
+    log("internal_call_transfer_failed", { message: error?.message || String(error) });
+    res.status(500).json({ error: "internal_call_transfer_failed", message: error?.message || "unknown_error" });
   }
 });
 
