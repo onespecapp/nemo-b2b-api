@@ -1665,7 +1665,7 @@ app.post("/api/billing/create-portal-session", requireAuth, async (req, res) => 
 app.post("/api/account/delete", requireAuth, async (req, res) => {
   try {
     const admin = requireSupabase();
-    const userId = req.auth.userId;
+    const userId = req.auth.user.id;
 
     const biz = await findBusinessForOwner(admin, userId);
     if (!biz) {
