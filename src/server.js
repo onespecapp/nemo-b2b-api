@@ -6,6 +6,7 @@ import { createClient } from "@supabase/supabase-js";
 import { postProcessTranscriptWithGemini } from "./transcriptPostprocess.js";
 import { SipClient } from "livekit-server-sdk";
 import Stripe from "stripe";
+import { checkAndSendTrialEmails } from "./trialEmails.js";
 
 dotenv.config();
 
@@ -68,6 +69,17 @@ function stripeStatusToSubscriptionStatus(status) {
   }
 }
 
+function isSubscriptionActive(business) {
+  const status = business?.subscription_status;
+  if (status === "ACTIVE") return true;
+  if (status === "TRIALING") {
+    const trialEnd = business?.trial_ends_at;
+    if (!trialEnd) return true; // no expiry set = active trial
+    return new Date(trialEnd) > new Date();
+  }
+  return false;
+}
+
 const supabaseAdmin =
   supabaseUrl && supabaseSecretKey
     ? createClient(supabaseUrl, supabaseSecretKey, {
@@ -127,6 +139,7 @@ app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (r
             stripe_customer_id: session.customer,
             subscription_tier: tier,
             subscription_status: status,
+            trial_ends_at: null,
           })
           .eq("id", businessId);
 
@@ -556,7 +569,7 @@ async function resolveBusinessForCall(admin, payload) {
   if (payload.business_id) {
     const { data, error } = await admin
       .from("b2b_businesses")
-      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone")
+      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone, subscription_status, trial_ends_at")
       .eq("id", payload.business_id)
       .limit(1)
       .maybeSingle();
@@ -575,7 +588,7 @@ async function resolveBusinessForCall(admin, payload) {
   if (calledCandidates.length > 0) {
     const { data, error } = await admin
       .from("b2b_businesses")
-      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone")
+      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone, subscription_status, trial_ends_at")
       .in("telnyx_phone_number", calledCandidates)
       .limit(1);
 
@@ -593,7 +606,7 @@ async function resolveBusinessForCall(admin, payload) {
   if (defaultBusinessId) {
     const { data, error } = await admin
       .from("b2b_businesses")
-      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone")
+      .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone, subscription_status, trial_ends_at")
       .eq("id", defaultBusinessId)
       .limit(1)
       .maybeSingle();
@@ -609,7 +622,7 @@ async function resolveBusinessForCall(admin, payload) {
 
   const { data, error } = await admin
     .from("b2b_businesses")
-    .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone")
+    .select("id, name, category, voice_preference, telnyx_phone_number, agent_config, transfer_phone, subscription_status, trial_ends_at")
     .order("created_at", { ascending: true })
     .limit(2);
 
@@ -884,6 +897,18 @@ app.post("/api/test-call", requireAuth, async (req, res) => {
       return;
     }
 
+    // Check subscription is active before allowing test calls
+    const { data: bizSub } = await admin
+      .from("b2b_businesses")
+      .select("subscription_status, trial_ends_at")
+      .eq("id", business.id)
+      .single();
+
+    if (!isSubscriptionActive(bizSub || business)) {
+      res.status(403).json({ error: "subscription_inactive", message: "Your subscription is not active. Please subscribe to make test calls." });
+      return;
+    }
+
     const customer = await findOrCreateCustomer(admin, business.id, phone, "Test Recipient");
 
     const { data: callLog, error: callLogError } = await admin
@@ -1009,12 +1034,28 @@ app.post("/internal/calls/start", requireInternalAuth, async (req, res) => {
       return;
     }
 
+    if (!isSubscriptionActive(business)) {
+      log("call_blocked_inactive_subscription", {
+        businessId: business.id,
+        status: business.subscription_status,
+        trialEndsAt: business.trial_ends_at || null
+      });
+      res.status(200).json({
+        success: true,
+        active: false,
+        business_id: business.id,
+        reason: "subscription_inactive"
+      });
+      return;
+    }
+
     const customer = await findOrCreateCustomer(admin, business.id, payload.caller_phone, payload.caller_name);
 
     const existing = await findExistingCallLog(admin, business.id, payload.telnyx_call_id, payload.room_name);
     if (existing) {
       res.status(200).json({
         success: true,
+        active: true,
         call_log_id: existing.id,
         business_id: business.id,
         business_name: business.name || null,
@@ -1048,6 +1089,7 @@ app.post("/internal/calls/start", requireInternalAuth, async (req, res) => {
 
     res.status(200).json({
       success: true,
+      active: true,
       call_log_id: inserted.id,
       business_id: business.id,
       business_name: business.name || null,
@@ -1661,6 +1703,58 @@ app.post("/api/billing/create-portal-session", requireAuth, async (req, res) => 
   }
 });
 
+// ── Trial email check (manual trigger) ──────────────────────────
+app.post("/internal/trial/check-emails", requireInternalAuth, async (req, res) => {
+  try {
+    const admin = requireSupabase();
+    await checkAndSendTrialEmails(admin, log);
+    res.json({ success: true });
+  } catch (error) {
+    log("trial_email_manual_check_failed", { message: error?.message || String(error) });
+    res.status(500).json({ error: "trial_email_check_failed" });
+  }
+});
+
+// ── Subscription status ─────────────────────────────────────────
+app.get("/api/subscription/status", requireAuth, async (req, res) => {
+  try {
+    const admin = requireSupabase();
+    const business = await findBusinessForOwner(admin, req.auth.user.id);
+    if (!business) {
+      res.status(404).json({ error: "business_not_found" });
+      return;
+    }
+
+    const { data: biz } = await admin
+      .from("b2b_businesses")
+      .select("subscription_tier, subscription_status, trial_ends_at")
+      .eq("id", business.id)
+      .single();
+
+    if (!biz) {
+      res.status(404).json({ error: "business_not_found" });
+      return;
+    }
+
+    let daysRemaining = null;
+    if (biz.subscription_status === "TRIALING" && biz.trial_ends_at) {
+      const msLeft = new Date(biz.trial_ends_at).getTime() - Date.now();
+      daysRemaining = Math.max(0, Math.ceil(msLeft / (1000 * 60 * 60 * 24)));
+    }
+
+    res.json({
+      tier: biz.subscription_tier,
+      status: biz.subscription_status,
+      trialEndsAt: biz.trial_ends_at || null,
+      daysRemaining,
+      isActive: isSubscriptionActive(biz),
+    });
+  } catch (error) {
+    log("subscription_status_failed", { message: error?.message || String(error) });
+    res.status(500).json({ error: "subscription_status_failed" });
+  }
+});
+
 // ── Delete account ──────────────────────────────────────────────
 app.post("/api/account/delete", requireAuth, async (req, res) => {
   try {
@@ -1713,4 +1807,17 @@ app.listen(port, () => {
     supabaseConfigured: Boolean(supabaseAdmin),
     internalAuthMode: internalApiToken ? "token" : "localhost_only"
   });
+
+  // Trial email cron — check every 6 hours + once on startup
+  if (supabaseAdmin && process.env.RESEND_API_KEY) {
+    const runTrialEmailCheck = () => {
+      try {
+        checkAndSendTrialEmails(supabaseAdmin, log);
+      } catch (error) {
+        log("trial_email_cron_error", { message: error?.message || String(error) });
+      }
+    };
+    setTimeout(runTrialEmailCheck, 5000); // 5s after startup
+    setInterval(runTrialEmailCheck, 6 * 60 * 60 * 1000); // every 6 hours
+  }
 });
