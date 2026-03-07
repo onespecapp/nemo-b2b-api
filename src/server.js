@@ -1661,6 +1661,46 @@ app.post("/api/billing/create-portal-session", requireAuth, async (req, res) => 
   }
 });
 
+// ── Delete account ──────────────────────────────────────────────
+app.post("/api/account/delete", requireAuth, async (req, res) => {
+  try {
+    const admin = requireSupabase();
+    const userId = req.auth.userId;
+
+    const biz = await findBusinessForOwner(admin, userId);
+    if (!biz) {
+      res.status(404).json({ error: "no_business_found" });
+      return;
+    }
+
+    // Delete business row — FK cascades handle customers, appointments, call logs, messages.
+    // Phone pool trigger releases the number automatically.
+    const { error: delErr } = await admin
+      .from("b2b_businesses")
+      .delete()
+      .eq("id", biz.id);
+
+    if (delErr) {
+      log("account_delete_business_failed", { userId, businessId: biz.id, message: delErr.message });
+      res.status(500).json({ error: "delete_failed" });
+      return;
+    }
+
+    // Delete auth user
+    const { error: authErr } = await admin.auth.admin.deleteUser(userId);
+    if (authErr) {
+      log("account_delete_auth_failed", { userId, message: authErr.message });
+      // Business is already gone, so still return success to the client
+    }
+
+    log("account_deleted", { userId, businessId: biz.id });
+    res.json({ success: true });
+  } catch (error) {
+    log("account_delete_error", { message: error?.message || "unknown" });
+    res.status(500).json({ error: "delete_failed" });
+  }
+});
+
 // Keep both endpoints for compatibility:
 // - /webhooks/telnyx/voice (local convention)
 // - /api/webhooks/telnyx/inbound (existing Railway-style path)
