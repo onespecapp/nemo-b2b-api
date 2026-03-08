@@ -1566,6 +1566,8 @@ app.post("/internal/appointments/book", requireInternalAuth, async (req, res) =>
       return;
     }
 
+    const callLogId = typeof req.body?.call_log_id === "string" ? req.body.call_log_id.trim() : "";
+
     const customer = await findOrCreateCustomer(admin, businessId, customerPhone, customerName);
 
     const { data: appointment, error: insertError } = await admin
@@ -1585,9 +1587,18 @@ app.post("/internal/appointments/book", requireInternalAuth, async (req, res) =>
       throw new Error(`appointment_insert_failed: ${insertError?.message || "unknown"}`);
     }
 
+    // Link the call log to this appointment
+    if (callLogId) {
+      await admin
+        .from("b2b_call_logs")
+        .update({ appointment_id: appointment.id })
+        .eq("id", callLogId);
+    }
+
     log("appointment_booked", {
       businessId,
       appointmentId: appointment.id,
+      callLogId: callLogId || null,
       scheduledAt,
       customerName
     });
