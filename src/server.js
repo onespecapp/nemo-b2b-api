@@ -1246,21 +1246,34 @@ app.post("/internal/calls/end", requireInternalAuth, async (req, res) => {
 
     // Send post-call SMS notifications
     const agentConfig = businessData?.agent_config || {};
+    const isDemo = !!agentConfig.isDemo;
 
     // Owner SMS: call summary to transfer_phone
-    if (agentConfig.smsNotifyOwner && businessData?.transfer_phone && businessData?.telnyx_phone_number) {
+    if (agentConfig.smsNotifyOwner && businessData?.telnyx_phone_number) {
       const summary = geminiTranscriptPostprocess?.summary || providedSummary || derivedSummary || "No summary available";
       const callerInfo = customerName || customerPhone || "Unknown caller";
       const durationMin = durationSec ? `${Math.ceil(durationSec / 60)} min` : "";
-      const smsBody = `Call from ${callerInfo}${durationMin ? ` (${durationMin})` : ""}\n${summary}`;
-      sendSmsNotification(businessData.transfer_phone, smsBody, businessData.telnyx_phone_number);
+      const ownerBody = `Call from ${callerInfo}${durationMin ? ` (${durationMin})` : ""}\n${summary}`;
+
+      if (isDemo && customerPhone) {
+        // Demo mode: send to caller with label
+        sendSmsNotification(customerPhone, `[DEMO - This is what YOU would receive as the business owner]\n\n${ownerBody}`, businessData.telnyx_phone_number);
+      } else if (businessData?.transfer_phone) {
+        sendSmsNotification(businessData.transfer_phone, ownerBody, businessData.telnyx_phone_number);
+      }
     }
 
     // Customer SMS: thank-you text to caller from the business's number
     if (agentConfig.smsNotifyCustomer && customerPhone && businessData?.telnyx_phone_number) {
       const bizName = businessData.name || "us";
       const customerSmsBody = `Thanks for calling ${bizName}! We've noted your inquiry and our team will follow up shortly.`;
-      sendSmsNotification(customerPhone, customerSmsBody, businessData.telnyx_phone_number);
+
+      if (isDemo) {
+        // Demo mode: send to caller with label
+        sendSmsNotification(customerPhone, `[DEMO - This is what YOUR CUSTOMER would receive]\n\n${customerSmsBody}`, businessData.telnyx_phone_number);
+      } else {
+        sendSmsNotification(customerPhone, customerSmsBody, businessData.telnyx_phone_number);
+      }
     }
 
     if (qualityPayload) {
