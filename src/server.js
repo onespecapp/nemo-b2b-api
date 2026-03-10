@@ -1628,6 +1628,146 @@ app.post("/internal/appointments/book", requireInternalAuth, async (req, res) =>
   }
 });
 
+// ── Vertical-Specific Routes ──
+
+app.post("/internal/vertical/repair-status", requireInternalAuth, async (req, res) => {
+  try {
+    const admin = requireSupabase();
+    const businessId = typeof req.body?.business_id === "string" ? req.body.business_id.trim() : "";
+    const callerPhone = typeof req.body?.caller_phone === "string" ? req.body.caller_phone.trim() : "";
+
+    if (!businessId) {
+      res.status(400).json({ error: "missing_business_id" });
+      return;
+    }
+    if (!callerPhone) {
+      res.status(400).json({ error: "missing_caller_phone" });
+      return;
+    }
+
+    // Find customer by phone
+    const phoneCandidates = candidatePhoneValues(callerPhone);
+    if (phoneCandidates.length === 0) {
+      res.status(200).json({ appointments: [] });
+      return;
+    }
+
+    const { data: customer } = await admin
+      .from("b2b_customers")
+      .select("id")
+      .eq("business_id", businessId)
+      .in("phone", phoneCandidates)
+      .limit(1)
+      .maybeSingle();
+
+    if (!customer) {
+      res.status(200).json({ appointments: [] });
+      return;
+    }
+
+    // Find active appointments for this customer
+    const { data: appointments, error: apptError } = await admin
+      .from("b2b_appointments")
+      .select("id, title, description, scheduled_at, status")
+      .eq("business_id", businessId)
+      .eq("customer_id", customer.id)
+      .in("status", ["SCHEDULED", "CONFIRMED", "IN_PROGRESS", "WAITING_PARTS", "READY_PICKUP"])
+      .order("scheduled_at", { ascending: false })
+      .limit(5);
+
+    if (apptError) {
+      throw new Error(`repair_status_lookup_failed: ${apptError.message}`);
+    }
+
+    log("repair_status_checked", {
+      businessId,
+      callerPhone,
+      found: (appointments || []).length,
+    });
+
+    res.status(200).json({
+      appointments: (appointments || []).map((a) => ({
+        id: a.id,
+        title: a.title,
+        description: a.description || null,
+        scheduled_at: a.scheduled_at,
+        status: a.status,
+      })),
+    });
+  } catch (error) {
+    log("repair_status_failed", { message: error?.message || String(error) });
+    res.status(500).json({ error: "repair_status_failed", message: error?.message || "unknown_error" });
+  }
+});
+
+app.post("/internal/vertical/estimate-request", requireInternalAuth, async (req, res) => {
+  try {
+    const admin = requireSupabase();
+    const businessId = typeof req.body?.business_id === "string" ? req.body.business_id.trim() : "";
+    const callerName = typeof req.body?.caller_name === "string" ? req.body.caller_name.trim() : "";
+    const callerPhone = typeof req.body?.caller_phone === "string" ? req.body.caller_phone.trim() : "";
+    const vehicleYear = typeof req.body?.vehicle_year === "string" ? req.body.vehicle_year.trim() : "";
+    const vehicleMake = typeof req.body?.vehicle_make === "string" ? req.body.vehicle_make.trim() : "";
+    const vehicleModel = typeof req.body?.vehicle_model === "string" ? req.body.vehicle_model.trim() : "";
+    const serviceNeeded = typeof req.body?.service_needed === "string" ? req.body.service_needed.trim() : "";
+
+    if (!businessId) {
+      res.status(400).json({ error: "missing_business_id" });
+      return;
+    }
+    if (!serviceNeeded) {
+      res.status(400).json({ error: "missing_service_needed" });
+      return;
+    }
+
+    // Check if business has price ranges in agent_config.serviceRanges
+    const { data: business, error: bizError } = await admin
+      .from("b2b_businesses")
+      .select("agent_config")
+      .eq("id", businessId)
+      .maybeSingle();
+
+    if (bizError) {
+      throw new Error(`business_lookup_failed: ${bizError.message}`);
+    }
+
+    const serviceRanges = business?.agent_config?.serviceRanges || {};
+    // Case-insensitive lookup
+    const serviceKey = Object.keys(serviceRanges).find(
+      (k) => k.toLowerCase() === serviceNeeded.toLowerCase()
+    );
+    const priceRange = serviceKey ? serviceRanges[serviceKey] : null;
+
+    // Save the estimate request as a message regardless
+    const vehicleDesc = [vehicleYear, vehicleMake, vehicleModel].filter(Boolean).join(" ");
+    const messageText = `Estimate request: ${serviceNeeded}${vehicleDesc ? ` for ${vehicleDesc}` : ""}${priceRange ? ` (quoted ${priceRange})` : ""}`;
+
+    await admin.from("b2b_messages").insert({
+      business_id: businessId,
+      caller_name: callerName || null,
+      caller_phone: callerPhone || null,
+      message: messageText,
+      reason: "Estimate request",
+      urgency: "normal",
+    });
+
+    log("estimate_requested", {
+      businessId,
+      serviceNeeded,
+      vehicleDesc: vehicleDesc || null,
+      hasPriceRange: Boolean(priceRange),
+    });
+
+    res.status(200).json({
+      success: true,
+      price_range: priceRange || null,
+    });
+  } catch (error) {
+    log("estimate_request_failed", { message: error?.message || String(error) });
+    res.status(500).json({ error: "estimate_request_failed", message: error?.message || "unknown_error" });
+  }
+});
+
 // ── Stripe Billing Routes ──
 
 app.post("/api/billing/create-checkout-session", requireAuth, async (req, res) => {
