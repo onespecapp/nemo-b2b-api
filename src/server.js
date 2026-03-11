@@ -518,9 +518,23 @@ async function requireAuth(req, res, next) {
       return;
     }
 
+    // Check super admin status
+    let isSuperAdmin = false;
+    try {
+      const { data: profile } = await admin
+        .from("profiles")
+        .select("is_super_admin")
+        .eq("id", data.user.id)
+        .maybeSingle();
+      isSuperAdmin = profile?.is_super_admin === true;
+    } catch (_) {
+      // Non-fatal: default to false
+    }
+
     req.auth = {
       accessToken,
-      user: data.user
+      user: data.user,
+      isSuperAdmin
     };
 
     next();
@@ -550,7 +564,19 @@ function requireInternalAuth(req, res, next) {
   next();
 }
 
-async function findBusinessForOwner(admin, ownerId, businessId) {
+async function findBusinessForOwner(admin, ownerId, businessId, { isSuperAdmin = false } = {}) {
+  // Super admin can look up any business by ID (skip owner check)
+  if (isSuperAdmin && businessId) {
+    const { data, error } = await admin
+      .from("b2b_businesses")
+      .select("id, owner_id, name")
+      .eq("id", businessId)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(`business_lookup_failed: ${error.message}`);
+    return data || null;
+  }
+
   let query = admin.from("b2b_businesses").select("id, owner_id, name").eq("owner_id", ownerId);
 
   if (businessId) {
@@ -872,6 +898,25 @@ app.get("/health", (_req, res) => {
   });
 });
 
+app.get("/api/admin/businesses", requireAuth, async (req, res) => {
+  try {
+    if (!req.auth.isSuperAdmin) {
+      res.status(403).json({ error: "forbidden" });
+      return;
+    }
+    const admin = requireSupabase();
+    const { data, error } = await admin
+      .from("b2b_businesses")
+      .select("id, name, category, phone, subscription_status, owner_id")
+      .order("name");
+    if (error) throw error;
+    res.status(200).json({ businesses: data || [] });
+  } catch (error) {
+    log("admin_businesses_failed", { message: error?.message || String(error) });
+    res.status(500).json({ error: "admin_businesses_failed" });
+  }
+});
+
 app.post("/api/test-call", requireAuth, async (req, res) => {
   try {
     const admin = requireSupabase();
@@ -892,7 +937,7 @@ app.post("/api/test-call", requireAuth, async (req, res) => {
       return;
     }
 
-    const business = await findBusinessForOwner(admin, userId, businessId);
+    const business = await findBusinessForOwner(admin, userId, businessId, { isSuperAdmin: req.auth.isSuperAdmin });
     if (!business) {
       res.status(403).json({ error: "business_access_denied" });
       return;
@@ -1384,7 +1429,7 @@ app.post("/api/outbound-call", requireAuth, async (req, res) => {
       return;
     }
 
-    const business = await findBusinessForOwner(admin, userId, businessId);
+    const business = await findBusinessForOwner(admin, userId, businessId, { isSuperAdmin: req.auth.isSuperAdmin });
     if (!business) {
       res.status(403).json({ error: "business_access_denied" });
       return;
@@ -1536,8 +1581,8 @@ app.post("/internal/appointments/availability", requireInternalAuth, async (req,
       })
     );
 
-    // Merge Google Calendar busy times if integration is active
-    if (gcal.isConfigured()) {
+    // Merge Google Calendar busy times — skip entirely if no integration for this business
+    if (gcal.isConfigured() && await gcal.hasActiveIntegration(admin, businessId)) {
       try {
         const dayStart = new Date(dateStr + "T00:00:00Z");
         const dayEnd = new Date(dateStr + "T23:59:59Z");
@@ -1657,9 +1702,9 @@ app.post("/internal/appointments/book", requireInternalAuth, async (req, res) =>
         .eq("id", callLogId);
     }
 
-    // Create Google Calendar event if integration is active
+    // Create Google Calendar event — skip entirely if no integration for this business
     let googleEventId = null;
-    if (gcal.isConfigured()) {
+    if (gcal.isConfigured() && await gcal.hasActiveIntegration(admin, businessId)) {
       try {
         const { data: biz } = await admin
           .from("b2b_businesses")
