@@ -7,6 +7,7 @@ import { postProcessTranscriptWithGemini } from "./transcriptPostprocess.js";
 import { SipClient } from "livekit-server-sdk";
 import Stripe from "stripe";
 import { checkAndSendTrialEmails } from "./trialEmails.js";
+import * as gcal from "./googleCalendar.js";
 
 dotenv.config();
 
@@ -1051,6 +1052,22 @@ app.post("/internal/calls/start", requireInternalAuth, async (req, res) => {
 
     const customer = await findOrCreateCustomer(admin, business.id, payload.caller_phone, payload.caller_name);
 
+    // Check if Google Calendar is connected for agent_config passthrough
+    let googleCalendarConnected = false;
+    if (gcal.isConfigured()) {
+      const { data: calIntegration } = await admin
+        .from("b2b_calendar_integrations")
+        .select("id")
+        .eq("business_id", business.id)
+        .eq("provider", "google_calendar")
+        .eq("status", "active")
+        .maybeSingle();
+      googleCalendarConnected = !!calIntegration;
+    }
+
+    const agentConfig = { ...(business.agent_config || {}) };
+    if (googleCalendarConnected) agentConfig.googleCalendarConnected = true;
+
     const existing = await findExistingCallLog(admin, business.id, payload.telnyx_call_id, payload.room_name);
     if (existing) {
       res.status(200).json({
@@ -1061,7 +1078,7 @@ app.post("/internal/calls/start", requireInternalAuth, async (req, res) => {
         business_name: business.name || null,
         business_category: business.category || null,
         voice_preference: business.voice_preference || null,
-        agent_config: business.agent_config || {},
+        agent_config: agentConfig,
         transfer_phone: business.transfer_phone || null,
         customer_id: customer?.id || null,
         reused: true
@@ -1095,7 +1112,7 @@ app.post("/internal/calls/start", requireInternalAuth, async (req, res) => {
       business_name: business.name || null,
       business_category: business.category || null,
       voice_preference: business.voice_preference || null,
-      agent_config: business.agent_config || {},
+      agent_config: agentConfig,
       transfer_phone: business.transfer_phone || null,
       customer_id: customer?.id || null,
       reused: false
@@ -1519,6 +1536,38 @@ app.post("/internal/appointments/availability", requireInternalAuth, async (req,
       })
     );
 
+    // Merge Google Calendar busy times if integration is active
+    if (gcal.isConfigured()) {
+      try {
+        const dayStart = new Date(dateStr + "T00:00:00Z");
+        const dayEnd = new Date(dateStr + "T23:59:59Z");
+        const busyIntervals = await gcal.getGoogleBusyTimes(admin, businessId, dayStart, dayEnd);
+        for (const interval of busyIntervals) {
+          // Mark each slot that overlaps with a busy interval
+          let slotH = openHour;
+          let slotM = openMin;
+          while (slotH < closeHour || (slotH === closeHour && slotM < closeMin)) {
+            const slotStartMin = slotH * 60 + slotM;
+            const slotEndMin = slotStartMin + slotDuration;
+            const busyStartMin = interval.start.getUTCHours() * 60 + interval.start.getUTCMinutes();
+            const busyEndMin = interval.end.getUTCHours() * 60 + interval.end.getUTCMinutes();
+            // Overlap check: slot overlaps busy if slot starts before busy ends AND slot ends after busy starts
+            if (slotStartMin < busyEndMin && slotEndMin > busyStartMin) {
+              bookedTimes.add(`${slotH}:${String(slotM).padStart(2, "0")}`);
+            }
+            slotM += slotDuration;
+            if (slotM >= 60) {
+              slotH += Math.floor(slotM / 60);
+              slotM = slotM % 60;
+            }
+          }
+        }
+      } catch (gcalErr) {
+        log("gcal_availability_error", { businessId, message: gcalErr?.message || String(gcalErr) });
+        // Graceful degradation: continue with DB-only slots
+      }
+    }
+
     const slots = [];
     let h = openHour;
     let m = openMin;
@@ -1608,12 +1657,45 @@ app.post("/internal/appointments/book", requireInternalAuth, async (req, res) =>
         .eq("id", callLogId);
     }
 
+    // Create Google Calendar event if integration is active
+    let googleEventId = null;
+    if (gcal.isConfigured()) {
+      try {
+        const { data: biz } = await admin
+          .from("b2b_businesses")
+          .select("timezone, default_appointment_duration")
+          .eq("id", businessId)
+          .maybeSingle();
+        const tz = biz?.timezone || "America/Los_Angeles";
+        const duration = biz?.default_appointment_duration || 60;
+        const startDate = new Date(scheduledAt);
+        const endDate = new Date(startDate.getTime() + duration * 60 * 1000);
+        googleEventId = await gcal.createCalendarEvent(admin, businessId, {
+          summary: title,
+          description: description || undefined,
+          start: startDate.toISOString(),
+          end: endDate.toISOString(),
+          timezone: tz,
+        });
+        if (googleEventId) {
+          await admin
+            .from("b2b_appointments")
+            .update({ google_calendar_event_id: googleEventId })
+            .eq("id", appointment.id);
+        }
+      } catch (gcalErr) {
+        log("gcal_event_create_error", { businessId, appointmentId: appointment.id, message: gcalErr?.message || String(gcalErr) });
+        // DB appointment is the source of truth — still return success
+      }
+    }
+
     log("appointment_booked", {
       businessId,
       appointmentId: appointment.id,
       callLogId: callLogId || null,
       scheduledAt,
-      customerName
+      customerName,
+      googleEventId
     });
 
     res.status(200).json({
@@ -1956,6 +2038,152 @@ app.post("/api/account/delete", requireAuth, async (req, res) => {
   } catch (error) {
     log("account_delete_error", { message: error?.message || "unknown" });
     res.status(500).json({ error: "delete_failed" });
+  }
+});
+
+// ── Google Calendar Integration Endpoints ──
+
+app.get("/api/integrations/google/connect", requireAuth, async (req, res) => {
+  try {
+    if (!gcal.isConfigured()) {
+      res.status(501).json({ error: "google_calendar_not_configured" });
+      return;
+    }
+    const admin = requireSupabase();
+    const { data: business } = await admin
+      .from("b2b_businesses")
+      .select("id")
+      .eq("owner_id", req.auth.user.id)
+      .maybeSingle();
+
+    if (!business) {
+      res.status(404).json({ error: "business_not_found" });
+      return;
+    }
+
+    const url = gcal.getAuthUrl(business.id, req.auth.user.id);
+    res.json({ url });
+  } catch (error) {
+    log("gcal_connect_error", { message: error?.message || String(error) });
+    res.status(500).json({ error: "gcal_connect_failed", message: error?.message || "unknown_error" });
+  }
+});
+
+app.get("/api/integrations/google/callback", async (req, res) => {
+  try {
+    if (!gcal.isConfigured()) {
+      res.redirect(`${frontendUrl}/dashboard/settings?gcal=error`);
+      return;
+    }
+    const admin = requireSupabase();
+    const { code, state } = req.query;
+
+    if (!code || !state) {
+      res.redirect(`${frontendUrl}/dashboard/settings?gcal=error`);
+      return;
+    }
+
+    const result = await gcal.handleCallback(code, state);
+    await gcal.upsertIntegration(admin, result);
+
+    log("gcal_connected", { businessId: result.businessId, email: result.email });
+    res.redirect(`${frontendUrl}/dashboard/settings?gcal=connected`);
+  } catch (error) {
+    log("gcal_callback_error", { message: error?.message || String(error) });
+    res.redirect(`${frontendUrl}/dashboard/settings?gcal=error`);
+  }
+});
+
+app.post("/api/integrations/google/disconnect", requireAuth, async (req, res) => {
+  try {
+    if (!gcal.isConfigured()) {
+      res.status(501).json({ error: "google_calendar_not_configured" });
+      return;
+    }
+    const admin = requireSupabase();
+    const { data: business } = await admin
+      .from("b2b_businesses")
+      .select("id")
+      .eq("owner_id", req.auth.user.id)
+      .maybeSingle();
+
+    if (!business) {
+      res.status(404).json({ error: "business_not_found" });
+      return;
+    }
+
+    await gcal.revokeIntegration(admin, business.id);
+    log("gcal_disconnected", { businessId: business.id });
+    res.json({ success: true });
+  } catch (error) {
+    log("gcal_disconnect_error", { message: error?.message || String(error) });
+    res.status(500).json({ error: "gcal_disconnect_failed", message: error?.message || "unknown_error" });
+  }
+});
+
+app.post("/api/appointments/:id/sync-calendar", requireAuth, async (req, res) => {
+  try {
+    if (!gcal.isConfigured()) {
+      res.json({ success: true, synced: false });
+      return;
+    }
+    const admin = requireSupabase();
+    const appointmentId = req.params.id;
+    const { data: business } = await admin
+      .from("b2b_businesses")
+      .select("id, timezone, default_appointment_duration")
+      .eq("owner_id", req.auth.user.id)
+      .maybeSingle();
+
+    if (!business) {
+      res.status(404).json({ error: "business_not_found" });
+      return;
+    }
+
+    const { data: appt } = await admin
+      .from("b2b_appointments")
+      .select("id, status, scheduled_at, title, description, google_calendar_event_id")
+      .eq("id", appointmentId)
+      .eq("business_id", business.id)
+      .maybeSingle();
+
+    if (!appt) {
+      res.status(404).json({ error: "appointment_not_found" });
+      return;
+    }
+
+    if (!appt.google_calendar_event_id) {
+      res.json({ success: true, synced: false });
+      return;
+    }
+
+    try {
+      if (appt.status === "CANCELED") {
+        await gcal.deleteCalendarEvent(admin, business.id, appt.google_calendar_event_id);
+        await admin
+          .from("b2b_appointments")
+          .update({ google_calendar_event_id: null })
+          .eq("id", appt.id);
+      } else {
+        const tz = business.timezone || "America/Los_Angeles";
+        const duration = business.default_appointment_duration || 60;
+        const startDate = new Date(appt.scheduled_at);
+        const endDate = new Date(startDate.getTime() + duration * 60 * 1000);
+        await gcal.updateCalendarEvent(admin, business.id, appt.google_calendar_event_id, {
+          summary: appt.title,
+          description: appt.description || undefined,
+          start: { dateTime: startDate.toISOString(), timeZone: tz },
+          end: { dateTime: endDate.toISOString(), timeZone: tz },
+        });
+      }
+      res.json({ success: true, synced: true });
+    } catch (syncErr) {
+      log("gcal_sync_error", { appointmentId, message: syncErr?.message || String(syncErr) });
+      res.json({ success: true, synced: false, error: syncErr?.message });
+    }
+  } catch (error) {
+    log("gcal_sync_endpoint_error", { message: error?.message || String(error) });
+    res.status(500).json({ error: "sync_failed", message: error?.message || "unknown_error" });
   }
 });
 
