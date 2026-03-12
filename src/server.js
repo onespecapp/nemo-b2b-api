@@ -1097,21 +1097,8 @@ app.post("/internal/calls/start", requireInternalAuth, async (req, res) => {
 
     const customer = await findOrCreateCustomer(admin, business.id, payload.caller_phone, payload.caller_name);
 
-    // Check if Google Calendar is connected for agent_config passthrough
-    let googleCalendarConnected = false;
-    if (gcal.isConfigured()) {
-      const { data: calIntegration } = await admin
-        .from("b2b_calendar_integrations")
-        .select("id")
-        .eq("business_id", business.id)
-        .eq("provider", "google_calendar")
-        .eq("status", "active")
-        .maybeSingle();
-      googleCalendarConnected = !!calIntegration;
-    }
-
+    // TODO: Google Calendar integration disabled for now
     const agentConfig = { ...(business.agent_config || {}) };
-    if (googleCalendarConnected) agentConfig.googleCalendarConnected = true;
 
     const existing = await findExistingCallLog(admin, business.id, payload.telnyx_call_id, payload.room_name);
     if (existing) {
@@ -1581,37 +1568,7 @@ app.post("/internal/appointments/availability", requireInternalAuth, async (req,
       })
     );
 
-    // Merge Google Calendar busy times — skip entirely if no integration for this business
-    if (gcal.isConfigured() && await gcal.hasActiveIntegration(admin, businessId)) {
-      try {
-        const dayStart = new Date(dateStr + "T00:00:00Z");
-        const dayEnd = new Date(dateStr + "T23:59:59Z");
-        const busyIntervals = await gcal.getGoogleBusyTimes(admin, businessId, dayStart, dayEnd);
-        for (const interval of busyIntervals) {
-          // Mark each slot that overlaps with a busy interval
-          let slotH = openHour;
-          let slotM = openMin;
-          while (slotH < closeHour || (slotH === closeHour && slotM < closeMin)) {
-            const slotStartMin = slotH * 60 + slotM;
-            const slotEndMin = slotStartMin + slotDuration;
-            const busyStartMin = interval.start.getUTCHours() * 60 + interval.start.getUTCMinutes();
-            const busyEndMin = interval.end.getUTCHours() * 60 + interval.end.getUTCMinutes();
-            // Overlap check: slot overlaps busy if slot starts before busy ends AND slot ends after busy starts
-            if (slotStartMin < busyEndMin && slotEndMin > busyStartMin) {
-              bookedTimes.add(`${slotH}:${String(slotM).padStart(2, "0")}`);
-            }
-            slotM += slotDuration;
-            if (slotM >= 60) {
-              slotH += Math.floor(slotM / 60);
-              slotM = slotM % 60;
-            }
-          }
-        }
-      } catch (gcalErr) {
-        log("gcal_availability_error", { businessId, message: gcalErr?.message || String(gcalErr) });
-        // Graceful degradation: continue with DB-only slots
-      }
-    }
+    // TODO: Google Calendar busy-time merge disabled for now
 
     const slots = [];
     let h = openHour;
@@ -1702,37 +1659,7 @@ app.post("/internal/appointments/book", requireInternalAuth, async (req, res) =>
         .eq("id", callLogId);
     }
 
-    // Create Google Calendar event — skip entirely if no integration for this business
-    let googleEventId = null;
-    if (gcal.isConfigured() && await gcal.hasActiveIntegration(admin, businessId)) {
-      try {
-        const { data: biz } = await admin
-          .from("b2b_businesses")
-          .select("timezone, default_appointment_duration")
-          .eq("id", businessId)
-          .maybeSingle();
-        const tz = biz?.timezone || "America/Los_Angeles";
-        const duration = biz?.default_appointment_duration || 60;
-        const startDate = new Date(scheduledAt);
-        const endDate = new Date(startDate.getTime() + duration * 60 * 1000);
-        googleEventId = await gcal.createCalendarEvent(admin, businessId, {
-          summary: title,
-          description: description || undefined,
-          start: startDate.toISOString(),
-          end: endDate.toISOString(),
-          timezone: tz,
-        });
-        if (googleEventId) {
-          await admin
-            .from("b2b_appointments")
-            .update({ google_calendar_event_id: googleEventId })
-            .eq("id", appointment.id);
-        }
-      } catch (gcalErr) {
-        log("gcal_event_create_error", { businessId, appointmentId: appointment.id, message: gcalErr?.message || String(gcalErr) });
-        // DB appointment is the source of truth — still return success
-      }
-    }
+    // TODO: Google Calendar event creation disabled for now
 
     log("appointment_booked", {
       businessId,
