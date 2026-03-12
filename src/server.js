@@ -1667,7 +1667,6 @@ app.post("/internal/appointments/book", requireInternalAuth, async (req, res) =>
       callLogId: callLogId || null,
       scheduledAt,
       customerName,
-      googleEventId
     });
 
     res.status(200).json({
