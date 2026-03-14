@@ -860,6 +860,14 @@ async function telnyxWebhookHandler(req, res) {
   }
 
   try {
+    // Skip outbound calls (e.g. transfer calls placed via LiveKit SIP)
+    const direction = req.body?.data?.payload?.direction || req.body?.payload?.direction;
+    if (direction === "outgoing") {
+      log("telnyx_webhook_skipped_outbound", { eventType, callControlId });
+      res.status(200).json({ ok: true, ignored: "outbound_call" });
+      return;
+    }
+
     if (eventType === "call.initiated") {
       await sendTelnyxCommand(callControlId, "answer");
       res.status(200).json({ ok: true, action: "answer" });
@@ -1350,7 +1358,7 @@ app.post("/internal/calls/transfer", requireInternalAuth, async (req, res) => {
 
     const { data: business, error: bizError } = await admin
       .from("b2b_businesses")
-      .select("transfer_phone")
+      .select("transfer_phone, telnyx_phone_number")
       .eq("id", businessId)
       .maybeSingle();
 
@@ -1381,7 +1389,7 @@ app.post("/internal/calls/transfer", requireInternalAuth, async (req, res) => {
       livekitSipOutboundTrunkId,
       business.transfer_phone,
       roomName,
-      { participantName: "Human Staff", playDialtone: false, playRingtone: false }
+      { participantName: "Human Staff", playDialtone: false, playRingtone: false, fromNumber: business.telnyx_phone_number || undefined }
     ).catch((err) => {
       log("sip_transfer_dial_failed", { callLogId, businessId, roomName, message: err?.message || String(err) });
     });
